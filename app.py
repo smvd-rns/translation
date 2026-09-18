@@ -1,6 +1,6 @@
 import os
+import tempfile
 import streamlit as st
-import torch
 from faster_whisper import WhisperModel
 
 st.set_page_config(
@@ -12,6 +12,17 @@ st.set_page_config(
 st.title("🎙️ Audio & Video Transcription App")
 st.write("Upload an audio or video file to generate a clean text transcript using Faster-Whisper.")
 
+# Safely check for CUDA device
+device = "cpu"
+try:
+    import torch
+    if torch.cuda.is_available():
+        device = "cuda"
+except Exception:
+    pass
+
+compute_type = "float16" if device == "cuda" else "default"
+
 # File uploader widget
 uploaded_file = st.file_uploader(
     "Choose an audio or video file", 
@@ -21,41 +32,44 @@ uploaded_file = st.file_uploader(
 model_size = st.selectbox("Select Model Size", ["tiny", "base", "small", "medium", "large-v3"], index=2)
 
 if uploaded_file is not None:
-    temp_filename = "temp_uploaded_file" + os.path.splitext(uploaded_file.name)[1]
-    
-    with open(temp_filename, "wb") as f:
-        f.write(uploaded_file.getbuffer())
-        
+    if uploaded_file.type.startswith("audio"):
+        st.audio(uploaded_file)
+    elif uploaded_file.type.startswith("video"):
+        st.video(uploaded_file)
+
     if st.button("Start Transcription", type="primary"):
         with st.spinner("Transcribing... Please wait (this may take a minute depending on file size and model choice)."):
+            suffix = os.path.splitext(uploaded_file.name)[1]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_file:
+                tmp_file.write(uploaded_file.getbuffer())
+                temp_path = tmp_file.name
+
             try:
-                # Setup device
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                compute_type = "float16" if device == "cuda" else "int8"
-                
                 # Load model
                 model = WhisperModel(model_size, device=device, compute_type=compute_type)
-                segments, info = model.transcribe(temp_filename, beam_size=1)
+                segments, info = model.transcribe(temp_path, beam_size=1)
                 
                 # Collect text
                 full_transcript = [segment.text.strip() for segment in segments if segment.text.strip()]
                 final_text = "\n\n".join(full_transcript)
                 
-                st.success(f"Transcription complete! (Detected language: {info.language} with probability {info.language_probability:.2f})")
-                
-                # Display text in a clean box
-                st.text_area("Transcript Result", final_text, height=300)
-                
-                # Download button
-                st.download_button(
-                    label="Download Transcript as Text File",
-                    data=final_text,
-                    file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
-                    mime="text/plain"
-                )
+                if final_text:
+                    st.success(f"Transcription complete! (Detected language: '{info.language}' with probability {info.language_probability:.2f})")
+                    
+                    # Display text in a clean box
+                    st.text_area("Transcript Result", final_text, height=300)
+                    
+                    # Download button
+                    st.download_button(
+                        label="Download Transcript as Text File",
+                        data=final_text,
+                        file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
+                        mime="text/plain"
+                    )
+                else:
+                    st.warning("No speech detected in the audio file.")
             except Exception as e:
                 st.error(f"An error occurred during transcription: {e}")
             finally:
-                # Clean up temporary file
-                if os.path.exists(temp_filename):
-                    os.remove(temp_filename)
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
