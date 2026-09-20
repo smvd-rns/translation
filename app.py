@@ -71,8 +71,8 @@ st.caption("💡 **gemini-3.5-flash-lite** — 500 requests/day free quota, fast
 chunk_duration = st.slider(
     "Audio Chunk Duration (minutes)",
     min_value=5,
-    max_value=20,
-    value=10,
+    max_value=30,
+    value=15,
     step=1,
     help="Long audio files will be automatically split into chunks of this size for optimal processing within Gemini rate limits."
 )
@@ -218,16 +218,30 @@ if uploaded_file is not None:
                         log(f"🧠 Transcribing speech with gemini-3.5-flash-lite (temp=0.0)...")
                         
                         try:
-                            # Use temperature=0.0 for deterministic greedy decoding (prevents repetition loops)
-                            config = types.GenerateContentConfig(
-                                temperature=0.0,
-                                system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
-                            )
-                            response = client.models.generate_content(
-                                model=model_choice,
-                                contents=[audio_file, prompt],
-                                config=config
-                            )
+                            # Robust Retry Loop for 503 (High Demand) & 429 Rate Limits
+                            response = None
+                            max_retries = 5
+                            for attempt in range(max_retries):
+                                try:
+                                    config = types.GenerateContentConfig(
+                                        temperature=0.0,
+                                        system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
+                                    )
+                                    response = client.models.generate_content(
+                                        model=model_choice,
+                                        contents=[audio_file, prompt],
+                                        config=config
+                                    )
+                                    break  # Success
+                                except Exception as err:
+                                    err_msg = str(err)
+                                    if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
+                                        wait_sec = (attempt + 1) * 8
+                                        log(f"⚠️ Google server busy (503). Retrying chunk {chunk_num} in {wait_sec}s (Attempt {attempt+1}/{max_retries})...")
+                                        time.sleep(wait_sec)
+                                    else:
+                                        raise err
+
                             if response and response.text:
                                 text_chunk = response.text.strip()
                                 transcripts.append(text_chunk)
@@ -257,15 +271,30 @@ if uploaded_file is not None:
                                 st.stop()
 
                         log(f"🧠 Transcribing speech with gemini-3.5-flash-lite (temp=0.0)...")
-                        model = legacy_genai.GenerativeModel(
-                            model_name=model_choice,
-                            generation_config={"temperature": 0.0}
-                        )
+                        
                         try:
-                            response = model.generate_content(
-                                [prompt, audio_file],
-                                request_options={"timeout": 600}
-                            )
+                            response = None
+                            max_retries = 5
+                            for attempt in range(max_retries):
+                                try:
+                                    model = legacy_genai.GenerativeModel(
+                                        model_name=model_choice,
+                                        generation_config={"temperature": 0.0}
+                                    )
+                                    response = model.generate_content(
+                                        [prompt, audio_file],
+                                        request_options={"timeout": 600}
+                                    )
+                                    break  # Success
+                                except Exception as err:
+                                    err_msg = str(err)
+                                    if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
+                                        wait_sec = (attempt + 1) * 8
+                                        log(f"⚠️ Google server busy (503). Retrying chunk {chunk_num} in {wait_sec}s (Attempt {attempt+1}/{max_retries})...")
+                                        time.sleep(wait_sec)
+                                    else:
+                                        raise err
+
                             if response and response.text:
                                 text_chunk = response.text.strip()
                                 transcripts.append(text_chunk)
@@ -287,10 +316,10 @@ if uploaded_file is not None:
                     # Update progress bar
                     progress_bar.progress((idx + 1) / total_chunks)
 
-                    # Respect RPM rate limit (6s pause between chunks = max 10 RPM)
+                    # Respect RPM rate limit (2s pause between chunks = max 15 RPM)
                     if idx < total_chunks - 1:
-                        log(f"⏳ Pausing 6 seconds to strictly respect 15 RPM rate limit...")
-                        time.sleep(6)
+                        log(f"⏳ Pausing 2 seconds before next chunk...")
+                        time.sleep(2)
 
                 total_time = int(time.time() - start_time)
                 log(f"🎉 All {total_chunks} chunk(s) finished in {total_time}s!")
