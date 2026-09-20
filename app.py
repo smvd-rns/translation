@@ -28,7 +28,7 @@ st.write("Upload an audio or video file to generate a transcript — powered by 
 
 # ── API Key Configuration ─────────────────────────────────────────────────────
 api_key = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"")
-groq_api_key = os.environ.get("GROQ_API_KEY", "").strip().strip("'\"")
+raw_groq_keys = os.environ.get("GROQ_API_KEY", "").strip().strip("'\"")
 
 if not api_key:
     st.sidebar.title("⚙️ Settings")
@@ -44,16 +44,19 @@ if not api_key:
     )
     api_key = user_api_key.strip().strip("'\"")
 
-if not groq_api_key:
+if not raw_groq_keys:
     groq_input = st.sidebar.text_input(
-        "Groq API Key (Optional Ultra-Fast Backup)",
+        "Groq API Key(s) (Comma-separated for multi-key speed)",
         type="password",
-        placeholder="gsk_...",
-        help="Free key from console.groq.com — transcribes chunks in 2 seconds!"
+        placeholder="gsk_key1, gsk_key2, gsk_key3",
+        help="Free key(s) from console.groq.com — transcribes whole 1-hr audio in 10 seconds!"
     )
-    groq_api_key = groq_input.strip().strip("'\"")
+    raw_groq_keys = groq_input.strip().strip("'\"")
 
-if not api_key and not groq_api_key:
+# Parse list of Groq keys for multi-key round-robin load balancing
+groq_keys = [k.strip() for k in raw_groq_keys.split(",") if k.strip()]
+
+if not api_key and not groq_keys:
     st.info(
         "👈 Enter your **Gemini API Key** or **Groq API Key** in the sidebar to get started."
     )
@@ -220,8 +223,8 @@ if uploaded_file is not None:
                 log("⚡ Launching Parallel Processing (3 concurrent workers for max speed)...")
                 import concurrent.futures
 
-                if groq_api_key:
-                    fallback_models = [model_choice, "groq-whisper", "gemini-3.5-flash"]
+                if groq_keys:
+                    fallback_models = ["groq-whisper", model_choice, "gemini-3.5-flash"]
                 else:
                     fallback_models = [model_choice, "gemini-3.5-flash", "gemini-3.0-flash"]
 
@@ -241,10 +244,11 @@ if uploaded_file is not None:
                         audio_file = None
 
                         try:
-                            # 🚀 Groq Whisper Fast Path
-                            if current_model == "groq-whisper" and groq_api_key:
-                                log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (whisper-large-v3-turbo)...")
-                                text_chunk = transcribe_with_groq(chunk_path, groq_api_key)
+                            # 🚀 Groq Whisper Fast Path (Multi-Key Round Robin)
+                            if current_model == "groq-whisper" and groq_keys:
+                                active_groq_key = groq_keys[idx % len(groq_keys)]
+                                log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (Key #{idx % len(groq_keys) + 1})...")
+                                text_chunk = transcribe_with_groq(chunk_path, active_groq_key)
                                 if text_chunk:
                                     words = len(text_chunk.split())
                                     log(f"⚡ [Chunk {chunk_num}/{total_chunks}] Groq complete in 2s! Transcribed {words} words.")
@@ -327,9 +331,12 @@ if uploaded_file is not None:
 
                     return (idx, "")
 
-                # Run workers concurrently with ThreadPoolExecutor
+                # Dynamically scale worker threads (e.g. 3 keys = 3 parallel worker threads)
+                num_workers = min(6, max(3, len(groq_keys)))
+                log(f"⚡ Running with {num_workers} parallel workers across {max(1, len(groq_keys))} key(s)...")
+
                 chunk_tuples = list(enumerate(chunk_files))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
                     future_to_chunk = {executor.submit(process_chunk_worker, item): item for item in chunk_tuples}
                     
                     for future in concurrent.futures.as_completed(future_to_chunk):
