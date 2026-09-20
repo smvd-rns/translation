@@ -180,25 +180,18 @@ if uploaded_file is not None:
 
                 start_time = time.time()
 
-                # ── Step 3: Process chunks sequentially ───────────────────────
-                fallback_models = [model_choice, "gemini-2.5-flash", "gemini-3.8-flash"]
+                # ── Step 3: Process chunks in parallel (3 concurrent workers) ──
+                log("⚡ Launching Parallel Processing (3 concurrent workers for max speed)...")
+                import concurrent.futures
 
-                for idx, chunk_path in enumerate(chunk_files):
+                fallback_models = [model_choice, "gemini-3.5-flash", "gemini-3.0-flash"]
+                transcripts_dict = {}
+                completed_count = 0
+
+                def process_chunk_worker(chunk_info):
+                    idx, chunk_path = chunk_info
                     chunk_num = idx + 1
                     chunk_size_mb = os.path.getsize(chunk_path) / (1024 * 1024)
-                    
-                    # Estimate remaining time
-                    elapsed = time.time() - start_time
-                    if idx > 0:
-                        avg_per_chunk = elapsed / idx
-                        rem_chunks = total_chunks - idx
-                        eta_sec = int(avg_per_chunk * rem_chunks)
-                        eta_str = f"~{eta_sec}s remaining"
-                    else:
-                        eta_str = "calculating ETA..."
-
-                    status_box.info(f"📤 Processing Chunk **{chunk_num} of {total_chunks}** ({eta_str})...")
-                    log(f"--- Chunk {chunk_num}/{total_chunks} ({chunk_size_mb:.1f} MB) ---")
 
                     response = None
                     max_retries = 4
@@ -208,13 +201,12 @@ if uploaded_file is not None:
                         audio_file = None
 
                         try:
-                            log(f"Uploading chunk {chunk_num} to Gemini (using {current_model})...")
+                            log(f"[Chunk {chunk_num}/{total_chunks}] Uploading to Gemini ({current_model})...")
                             
                             if USE_NEW_SDK:
                                 audio_file = client.files.upload(file=chunk_path)
-                                log(f"Uploaded. Storage ID: {audio_file.name}")
+                                log(f"[Chunk {chunk_num}/{total_chunks}] Uploaded. Storage ID: {audio_file.name}")
 
-                                # Poll for processing status if needed
                                 wait_count = 0
                                 while hasattr(audio_file, 'state') and str(getattr(audio_file.state, 'name', audio_file.state)) == "PROCESSING":
                                     time.sleep(2)
@@ -223,7 +215,7 @@ if uploaded_file is not None:
                                     if wait_count > 20:
                                         break
 
-                                log(f"🧠 Transcribing speech with {current_model}...")
+                                log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
                                 config = types.GenerateContentConfig(
                                     temperature=0.0,
                                     system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
@@ -235,7 +227,7 @@ if uploaded_file is not None:
                                 )
                             else:
                                 audio_file = legacy_genai.upload_file(path=chunk_path)
-                                log(f"Uploaded. Storage ID: {audio_file.name}")
+                                log(f"[Chunk {chunk_num}/{total_chunks}] Uploaded. Storage ID: {audio_file.name}")
 
                                 wait_count = 0
                                 while audio_file.state.name == "PROCESSING":
@@ -245,7 +237,7 @@ if uploaded_file is not None:
                                     if wait_count > 20:
                                         break
 
-                                log(f"🧠 Transcribing speech with {current_model}...")
+                                log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
                                 model = legacy_genai.GenerativeModel(
                                     model_name=current_model,
                                     generation_config={"temperature": 0.0}
@@ -257,24 +249,22 @@ if uploaded_file is not None:
 
                             if response and response.text:
                                 text_chunk = response.text.strip()
-                                transcripts.append(text_chunk)
                                 words = len(text_chunk.split())
-                                log(f"✅ Chunk {chunk_num} complete! Transcribed {words} words.")
-                                break  # Success! Exit retry loop
+                                log(f"✅ [Chunk {chunk_num}/{total_chunks}] Complete! Transcribed {words} words.")
+                                return (idx, text_chunk)
 
                         except Exception as err:
                             err_msg = str(err)
                             if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
                                 next_model = fallback_models[(attempt + 1) % len(fallback_models)]
-                                log(f"⚠️ {current_model} server busy (503). Switching to '{next_model}' (Attempt {attempt+2}/{max_retries})...")
+                                log(f"⚠️ [Chunk {chunk_num}/{total_chunks}] Server busy (503). Retrying with '{next_model}'...")
                                 time.sleep(3)
                             else:
                                 if attempt == max_retries - 1:
-                                    st.error(f"Error processing chunk {chunk_num}: {err}")
+                                    log(f"❌ [Chunk {chunk_num}/{total_chunks}] Error: {err}")
                                     raise err
                                 time.sleep(3)
                         finally:
-                            # Clean up file on every attempt to prevent stale handles
                             if audio_file:
                                 try:
                                     if USE_NEW_SDK:
@@ -284,17 +274,26 @@ if uploaded_file is not None:
                                 except Exception:
                                     pass
 
-                    # Update live transcript preview after each chunk!
-                    current_combined = "\n\n".join(transcripts)
-                    transcript_preview.text_area("Live Output", current_combined, height=250, key=f"preview_{idx}")
+                    return (idx, "")
 
-                    # Update progress bar
-                    progress_bar.progress((idx + 1) / total_chunks)
-
-                    # Respect RPM rate limit (2s pause between chunks = max 15 RPM)
-                    if idx < total_chunks - 1:
-                        log(f"⏳ Pausing 2 seconds before next chunk...")
-                        time.sleep(2)
+                # Run workers concurrently with ThreadPoolExecutor
+                chunk_tuples = list(enumerate(chunk_files))
+                with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+                    future_to_chunk = {executor.submit(process_chunk_worker, item): item for item in chunk_tuples}
+                    
+                    for future in concurrent.futures.as_completed(future_to_chunk):
+                        completed_count += 1
+                        idx, text_chunk = future.result()
+                        transcripts_dict[idx] = text_chunk
+                        
+                        # Update live preview (chronological order)
+                        ordered_texts = [transcripts_dict[i] for i in range(total_chunks) if i in transcripts_dict]
+                        current_combined = "\n\n".join(ordered_texts)
+                        transcript_preview.text_area("Live Output", current_combined, height=250, key=f"preview_{completed_count}")
+                        
+                        # Update progress bar
+                        progress_bar.progress(completed_count / total_chunks)
+                        status_box.info(f"⚡ Parallel Processing: **{completed_count} of {total_chunks} chunks completed**...")
 
                 total_time = int(time.time() - start_time)
                 log(f"🎉 All {total_chunks} chunk(s) finished in {total_time}s!")
@@ -302,7 +301,7 @@ if uploaded_file is not None:
                 progress_bar.empty()
 
                 # ── Step 4: Show final output ──────────────────────────────────
-                final_text = "\n\n".join(transcripts).strip()
+                final_text = "\n\n".join([transcripts_dict[i] for i in range(total_chunks) if i in transcripts_dict]).strip()
 
                 if final_text:
                     st.success(f"🎉 Transcription complete! Processed {total_chunks} chunk(s) in {total_time} seconds.")
