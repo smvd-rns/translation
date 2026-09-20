@@ -67,13 +67,15 @@ if USE_NEW_SDK and api_key:
 elif api_key:
     legacy_genai.configure(api_key=api_key)
 
-def transcribe_with_groq(chunk_path, key):
+def transcribe_with_groq(chunk_path, key, language=None):
     """Transcribes audio using Groq Whisper API (whisper-large-v3-turbo)."""
     url = "https://api.groq.com/openai/v1/audio/transcriptions"
     headers = {"Authorization": f"Bearer {key}"}
     with open(chunk_path, "rb") as f:
         files = {"file": (os.path.basename(chunk_path), f, "audio/mp3")}
         data = {"model": "whisper-large-v3-turbo"}
+        if language:
+            data["language"] = language
         resp = requests.post(url, headers=headers, files=files, data=data, timeout=120)
         if resp.status_code == 200:
             return resp.json().get("text", "")
@@ -92,6 +94,36 @@ model_choice = st.selectbox(
     index=0
 )
 st.caption("💡 **gemini-3.5-flash-lite** — 500 requests/day free quota, fast, handles hours of audio.")
+
+language_options = {
+    "English 🇬🇧 (en)": "en",
+    "Auto-Detect (Whisper auto-detects per chunk)": None,
+    "Hindi 🇮🇳 (hi)": "hi",
+    "Urdu 🇵🇰 (ur)": "ur",
+    "Marathi 🇮🇳 (mr)": "mr",
+    "Bengali 🇮🇳 (bn)": "bn",
+    "Tamil 🇮🇳 (ta)": "ta",
+    "Telugu 🇮🇳 (te)": "te",
+    "Gujarati 🇮🇳 (gu)": "gu",
+    "Kannada 🇮🇳 (kn)": "kn",
+    "Malayalam 🇮🇳 (ml)": "ml",
+    "Punjabi 🇮🇳 (pa)": "pa",
+    "Spanish 🇪🇸 (es)": "es",
+    "French 🇫🇷 (fr)": "fr",
+    "German 🇩🇪 (de)": "de",
+    "Arabic 🇸🇦 (ar)": "ar",
+    "Russian 🇷🇺 (ru)": "ru",
+    "Japanese 🇯🇵 (ja)": "ja",
+    "Chinese 🇨🇳 (zh)": "zh"
+}
+
+selected_lang_label = st.selectbox(
+    "🌐 Audio Primary Language (Fixes language mixing across chunks)",
+    options=list(language_options.keys()),
+    index=0,
+    help="Selecting a specific language forces Whisper & Gemini to process all chunks in that language and native script, preventing unwanted translation or script switching."
+)
+selected_language_code = language_options[selected_lang_label]
 
 chunk_duration = st.slider(
     "Audio Chunk Duration (minutes)",
@@ -209,12 +241,18 @@ if uploaded_file is not None:
 
                 transcripts = []
 
+                lang_rule = ""
+                if selected_language_code:
+                    lang_name = selected_lang_label.split(" (")[0]
+                    lang_rule = f"\n4. The primary spoken language is {lang_name}. Transcribe strictly in {lang_name} using its native script."
+
                 prompt = (
                     "Please transcribe the speech in this audio file accurately. "
                     "Important rules:\n"
                     "1. Output only the spoken text preserving natural paragraph breaks.\n"
                     "2. If there are repeating chants, mantras, or background music, transcribe the words accurately without repeating the same line over and over endlessly.\n"
                     "3. Do not add commentary, timestamps, or extra formatting."
+                    f"{lang_rule}"
                 )
 
                 start_time = time.time()
@@ -247,8 +285,8 @@ if uploaded_file is not None:
                             # 🚀 Groq Whisper Fast Path (Multi-Key Round Robin)
                             if current_model == "groq-whisper" and groq_keys:
                                 active_groq_key = groq_keys[idx % len(groq_keys)]
-                                log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (Key #{idx % len(groq_keys) + 1})...")
-                                text_chunk = transcribe_with_groq(chunk_path, active_groq_key)
+                                log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (Key #{idx % len(groq_keys) + 1}, Lang: {selected_language_code or 'auto'})...")
+                                text_chunk = transcribe_with_groq(chunk_path, active_groq_key, language=selected_language_code)
                                 if text_chunk:
                                     words = len(text_chunk.split())
                                     log(f"⚡ [Chunk {chunk_num}/{total_chunks}] Groq complete in 2s! Transcribed {words} words.")
