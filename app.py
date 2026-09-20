@@ -1,11 +1,12 @@
 import os
 import gc
-import math
+import glob
+import time
 import tempfile
 import subprocess
 import traceback
 import streamlit as st
-from groq import Groq
+import google.generativeai as genai
 
 st.set_page_config(
     page_title="Audio & Video Transcription App",
@@ -14,147 +15,171 @@ st.set_page_config(
 )
 
 st.title("🎙️ Audio & Video Transcription App")
-st.write("Upload an audio or video file to generate a clean text transcript — powered by Groq Whisper AI.")
+st.write("Upload an audio or video file to generate a transcript — powered by Google Gemini AI.")
 
-# ── API Key input ────────────────────────────────────────────────────────────
+# ── Sidebar: API Key ─────────────────────────────────────────────────────────
 st.sidebar.title("⚙️ Settings")
 st.sidebar.markdown(
-    "Get your **free** Groq API key at [console.groq.com](https://console.groq.com) → API Keys"
+    "Get your **free** Gemini API key at "
+    "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)"
 )
 
-# Try environment variable first, then sidebar input
-api_key = os.environ.get("GROQ_API_KEY", "")
+api_key = os.environ.get("GEMINI_API_KEY", "")
 if not api_key:
     api_key = st.sidebar.text_input(
-        "Groq API Key",
+        "Gemini API Key",
         type="password",
-        placeholder="gsk_..."
+        placeholder="AIza..."
     )
 
 if not api_key:
-    st.warning(
-        "⚠️ Please enter your **Groq API Key** in the sidebar to use this app.\n\n"
-        "👉 Get a free key at [console.groq.com](https://console.groq.com) — takes 1 minute."
+    st.info(
+        "👈 Enter your **Gemini API Key** in the sidebar to get started.\n\n"
+        "🔑 Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — takes 30 seconds."
     )
     st.stop()
 
-# ── File uploader ────────────────────────────────────────────────────────────
+genai.configure(api_key=api_key)
+
+# ── File uploader ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
     "Choose an audio or video file",
     type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"]
 )
 
-CHUNK_MB = 20  # Groq allows max 25MB per request; use 20MB chunks with safety margin
-GROQ_MODEL = "whisper-large-v3-turbo"
+model_choice = st.selectbox(
+    "Select Gemini Model",
+    ["gemini-3.5-flash-lite"],
+    index=0
+)
+st.caption("💡 **gemini-3.5-flash-lite** — 500 requests/day free quota, fast, handles hours of audio.")
+
+chunk_duration = st.slider(
+    "Audio Chunk Duration (minutes)",
+    min_value=5,
+    max_value=20,
+    value=10,
+    step=1,
+    help="Long audio files will be automatically split into chunks of this size for optimal processing within Gemini rate limits."
+)
+
+def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
+    """Slices input media into MP3 chunks using ffmpeg."""
+    chunk_pattern = os.path.join(tmp_dir, "chunk_%03d.mp3")
+    segment_seconds = str(chunk_minutes * 60)
+    
+    cmd = [
+        "ffmpeg", "-y", "-i", input_path,
+        "-f", "segment",
+        "-segment_time", segment_seconds,
+        "-c:a", "libmp3lame", "-b:a", "64k",
+        chunk_pattern
+    ]
+    
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        chunks = sorted(glob.glob(os.path.join(tmp_dir, "chunk_*.mp3")))
+        if chunks:
+            return chunks
+    except Exception as ex:
+        st.warning(f"ffmpeg chunking unavailable ({ex}). Processing as single file.")
+    
+    return [input_path]
 
 if uploaded_file is not None:
+    file_size_mb = uploaded_file.size / (1024 * 1024)
+
     if uploaded_file.type.startswith("audio"):
         st.audio(uploaded_file)
     elif uploaded_file.type.startswith("video"):
         st.video(uploaded_file)
 
-    file_size_mb = uploaded_file.size / (1024 * 1024)
     st.caption(f"📁 File size: **{file_size_mb:.1f} MB**")
 
     if st.button("Start Transcription", type="primary"):
+        suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
             original_path = os.path.join(tmp_dir, "input" + suffix)
-            chunks_dir = os.path.join(tmp_dir, "chunks")
-            os.makedirs(chunks_dir, exist_ok=True)
 
             try:
                 status = st.empty()
+                progress_bar = st.progress(0)
 
-                # ── Step 1: Save file ────────────────────────────────────────
+                # ── Step 1: Save uploaded file ────────────────────────────────
                 status.info("💾 Saving uploaded file...")
                 with open(original_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
 
-                # ── Step 2: Get duration via ffprobe ─────────────────────────
-                probe = subprocess.run(
-                    ["ffprobe", "-v", "error",
-                     "-show_entries", "format=duration",
-                     "-of", "default=noprint_wrappers=1:nokey=1",
-                     original_path],
-                    capture_output=True, text=True
-                )
-                total_duration = float(probe.stdout.strip()) if probe.stdout.strip() else 0
-
-                # ── Step 3: Calculate chunk duration based on file size ───────
-                # Each chunk should be ~CHUNK_MB MB
-                if file_size_mb <= CHUNK_MB:
-                    # Small file — send directly, no splitting needed
-                    chunk_files = [original_path]
-                    status.info(f"📤 File is {file_size_mb:.1f} MB — sending directly to Groq...")
-                else:
-                    # Split by duration proportional to size
-                    chunk_duration = int((CHUNK_MB / file_size_mb) * total_duration)
-                    chunk_duration = max(60, min(chunk_duration, 600))  # between 1 and 10 min
-                    num_chunks = math.ceil(total_duration / chunk_duration)
-                    status.info(
-                        f"🔪 Splitting {total_duration/60:.1f}-min audio into ~{num_chunks} "
-                        f"chunks of ~{chunk_duration//60} min each..."
-                    )
-
-                    chunk_pattern = os.path.join(chunks_dir, "chunk_%03d.mp3")
-                    subprocess.run(
-                        ["ffmpeg", "-y", "-i", original_path,
-                         "-f", "segment",
-                         "-segment_time", str(chunk_duration),
-                         "-c:a", "libmp3lame", "-q:a", "5",
-                         chunk_pattern],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True
-                    )
-
-                    import glob
-                    chunk_files = sorted(glob.glob(os.path.join(chunks_dir, "chunk_*.mp3")))
-                    status.info(f"✅ Split into {len(chunk_files)} chunks. Starting transcription...")
-
-                # ── Step 4: Transcribe each chunk via Groq API ───────────────
-                client = Groq(api_key=api_key)
+                # ── Step 2: Chunk media file into 10-minute segments ──────────
+                status.info(f"⚡ Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
+                chunk_files = chunk_media_file(original_path, tmp_dir, chunk_minutes=chunk_duration)
                 total_chunks = len(chunk_files)
+                status.info(f"✅ Prepared **{total_chunks} chunk(s)** for processing.")
 
-                progress_bar = st.progress(0.0)
-                chunk_label = st.empty()
-                live_box = st.empty()
+                transcripts = []
+                model = genai.GenerativeModel(model_name=model_choice)
 
-                all_parts = []
+                prompt = (
+                    "Please transcribe all the speech in this audio file. "
+                    "Output only the spoken text, preserving natural paragraph breaks. "
+                    "Do not add commentary, timestamps, or extra formatting."
+                )
 
-                for i, chunk_path in enumerate(chunk_files):
-                    chunk_num = i + 1
-                    chunk_label.markdown(
-                        f"⚡ **Groq Transcribing** chunk {chunk_num} of {total_chunks} "
-                        f"on remote GPU..."
-                    )
+                # ── Step 3: Process chunks sequentially ───────────────────────
+                for idx, chunk_path in enumerate(chunk_files):
+                    chunk_num = idx + 1
+                    status.info(f"📤 [Chunk {chunk_num}/{total_chunks}] Uploading to Gemini API...")
+                    
+                    audio_file = genai.upload_file(path=chunk_path)
 
-                    with open(chunk_path, "rb") as audio_file:
-                        response = client.audio.transcriptions.create(
-                            model=GROQ_MODEL,
-                            file=audio_file,
-                            response_format="text"
+                    # Poll until processing completes
+                    wait_count = 0
+                    while audio_file.state.name == "PROCESSING":
+                        time.sleep(2)
+                        audio_file = genai.get_file(audio_file.name)
+                        wait_count += 1
+                        if wait_count > 30:
+                            st.error(f"Chunk {chunk_num} processing timed out.")
+                            st.stop()
+
+                    if audio_file.state.name == "FAILED":
+                        st.error(f"Gemini failed to process chunk {chunk_num}.")
+                        st.stop()
+
+                    status.info(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing speech...")
+                    
+                    try:
+                        response = model.generate_content(
+                            [prompt, audio_file],
+                            request_options={"timeout": 600}
                         )
+                        if response and response.text:
+                            transcripts.append(response.text.strip())
+                    finally:
+                        # Always clean up file from Gemini storage
+                        try:
+                            genai.delete_file(audio_file.name)
+                        except Exception:
+                            pass
 
-                    chunk_text = response.strip() if isinstance(response, str) else response.text.strip()
-                    if chunk_text:
-                        all_parts.append(chunk_text)
+                    # Update progress
+                    progress_bar.progress((idx + 1) / total_chunks)
 
-                    progress_bar.progress(chunk_num / total_chunks)
-                    live_box.text_area(
-                        "Live Transcript (building...)",
-                        "\n\n".join(all_parts),
-                        height=350
-                    )
+                    # Respect RPM rate limit (6s pause between chunks = max 10 RPM)
+                    if idx < total_chunks - 1:
+                        status.info(f"⏳ Waiting 6s to stay safely within API rate limits...")
+                        time.sleep(6)
 
-                # ── Step 5: Final result ─────────────────────────────────────
-                progress_bar.progress(1.0)
-                chunk_label.success("🎉 Transcription complete!")
                 status.empty()
+                progress_bar.empty()
 
-                final_text = "\n\n".join(all_parts)
+                # ── Step 4: Show final output ──────────────────────────────────
+                final_text = "\n\n".join(transcripts).strip()
+
                 if final_text:
-                    st.text_area("Full Transcript", final_text, height=400)
+                    st.success(f"🎉 Transcription complete! Processed {total_chunks} chunk(s).")
+                    st.text_area("Transcript", final_text, height=400)
                     st.download_button(
                         label="📥 Download Transcript (.txt)",
                         data=final_text,
@@ -162,10 +187,11 @@ if uploaded_file is not None:
                         mime="text/plain"
                     )
                 else:
-                    st.warning("No speech detected in the audio file.")
+                    st.warning("No transcript was generated. The file may have no speech or the model could not process it.")
 
             except Exception as e:
                 st.error(f"Error: {e}")
                 st.code(traceback.format_exc())
             finally:
                 gc.collect()
+

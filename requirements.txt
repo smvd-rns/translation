@@ -1,3 +1,2 @@
 streamlit
-groq
-pydub
+google-generativeai
