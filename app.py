@@ -24,13 +24,16 @@ st.sidebar.markdown(
     "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)"
 )
 
-api_key = os.environ.get("GEMINI_API_KEY", "")
-if not api_key:
-    api_key = st.sidebar.text_input(
-        "Gemini API Key",
-        type="password",
-        placeholder="AIza..."
-    )
+env_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+user_api_key = st.sidebar.text_input(
+    "Gemini API Key",
+    value=env_api_key,
+    type="password",
+    placeholder="AIzaSy...",
+    help="Enter your API key from aistudio.google.com/apikey"
+)
+
+api_key = user_api_key.strip().strip("'\"")
 
 if not api_key:
     st.info(
@@ -38,6 +41,9 @@ if not api_key:
         "🔑 Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — takes 30 seconds."
     )
     st.stop()
+
+if not api_key.startswith("AIza"):
+    st.sidebar.warning("⚠️ Google Gemini API keys usually start with 'AIza...'. Please check your key at aistudio.google.com/apikey")
 
 genai.configure(api_key=api_key)
 
