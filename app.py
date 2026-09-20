@@ -146,18 +146,32 @@ if uploaded_file is not None:
                 transcript_preview = st.empty()
 
                 logs = []
+                import queue
+                log_queue = queue.Queue()
 
                 def log(msg):
                     ts = time.strftime("%H:%M:%S")
-                    logs.append(f"[{ts}] {msg}")
-                    log_box.code("\n".join(logs[-15:]), language="text")
+                    log_queue.put(f"[{ts}] {msg}")
+
+                def flush_logs():
+                    updated = False
+                    while not log_queue.empty():
+                        try:
+                            logs.append(log_queue.get_nowait())
+                            updated = True
+                        except Exception:
+                            break
+                    if updated:
+                        log_box.code("\n".join(logs[-15:]), language="text")
 
                 # ── Step 1: Save uploaded file ────────────────────────────────
                 status_box.info("💾 Step 1/3: Saving uploaded file to local memory...")
                 log(f"Saving '{uploaded_file.name}' ({file_size_mb:.1f} MB)...")
+                flush_logs()
                 with open(original_path, "wb") as f:
                     f.write(uploaded_file.getbuffer())
                 log(f"Saved file successfully.")
+                flush_logs()
 
                 # ── Step 2: Chunk media file into segments ────────────────────
                 status_box.info(f"⚡ Step 2/3: Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
@@ -282,6 +296,7 @@ if uploaded_file is not None:
                     future_to_chunk = {executor.submit(process_chunk_worker, item): item for item in chunk_tuples}
                     
                     for future in concurrent.futures.as_completed(future_to_chunk):
+                        flush_logs()
                         completed_count += 1
                         idx, text_chunk = future.result()
                         transcripts_dict[idx] = text_chunk
@@ -294,9 +309,12 @@ if uploaded_file is not None:
                         # Update progress bar
                         progress_bar.progress(completed_count / total_chunks)
                         status_box.info(f"⚡ Parallel Processing: **{completed_count} of {total_chunks} chunks completed**...")
+                        flush_logs()
 
+                flush_logs()
                 total_time = int(time.time() - start_time)
                 log(f"🎉 All {total_chunks} chunk(s) finished in {total_time}s!")
+                flush_logs()
                 status_box.empty()
                 progress_bar.empty()
 
