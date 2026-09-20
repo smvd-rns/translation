@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: streamlit-audio-transcription
+    env: docker
+    plan: free
+    dockerfilePath: Dockerfile
+    healthCheckPath: /_stcore/health

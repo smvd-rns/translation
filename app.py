@@ -33,6 +33,7 @@ try:
     )
 
     model_size = st.selectbox("Select Model Size", ["tiny", "base", "small", "medium"], index=1)
+    st.caption("💡 *Note for cloud deployment (e.g. Render free tier): Use 'tiny' or 'base' models to avoid running out of memory (RAM).*")
 
     if uploaded_file is not None:
         if uploaded_file.type.startswith("audio"):
