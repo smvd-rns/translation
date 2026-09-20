@@ -1,3 +1,11 @@
+import streamlit as st
+
+st.set_page_config(
+    page_title="Translation - Audio & Video Transcription",
+    page_icon="🎙️",
+    layout="centered"
+)
+
 import os
 import gc
 import glob
@@ -6,7 +14,6 @@ import tempfile
 import subprocess
 import traceback
 import requests
-import streamlit as st
 
 # Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
 try:
@@ -16,12 +23,6 @@ try:
 except ImportError:
     import google.generativeai as legacy_genai
     USE_NEW_SDK = False
-
-st.set_page_config(
-    page_title="Audio & Video Transcription App",
-    page_icon="🎙️",
-    layout="centered"
-)
 
 st.title("🎙️ Audio & Video Transcription App")
 st.write("Upload an audio or video file to generate a transcript — powered by Google Gemini AI & Groq Whisper.")
