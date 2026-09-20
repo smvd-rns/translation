@@ -11,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Patch default Streamlit HTML title so it shows Translation on initial page load
-RUN python -c "import streamlit, os; p = os.path.join(os.path.dirname(streamlit.__file__), 'static', 'index.html'); open(p, 'w').write(open(p).read().replace('<title>Streamlit</title>', '<title>Translation - Audio & Video Transcription</title>'))"
+RUN python -c "import streamlit, os; p = os.path.join(os.path.dirname(streamlit.__file__), 'static', 'index.html'); html = open(p, 'r').read().replace('<title>Streamlit</title>', '<title>Translation - Audio & Video Transcription</title>'); open(p, 'w').write(html)"
 
 COPY . .
 
