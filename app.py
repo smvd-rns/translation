@@ -220,11 +220,10 @@ if uploaded_file is not None:
                 log("⚡ Launching Parallel Processing (3 concurrent workers for max speed)...")
                 import concurrent.futures
 
-                fallback_models = [model_choice, "gemini-3.5-flash"]
                 if groq_api_key:
-                    fallback_models.append("groq-whisper")
+                    fallback_models = [model_choice, "groq-whisper", "gemini-3.5-flash"]
                 else:
-                    fallback_models.append("gemini-3.0-flash")
+                    fallback_models = [model_choice, "gemini-3.5-flash", "gemini-3.0-flash"]
 
                 transcripts_dict = {}
                 completed_count = 0
