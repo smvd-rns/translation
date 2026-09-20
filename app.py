@@ -50,22 +50,45 @@ try:
 
                 try:
                     # Load model
+                    status_info = st.empty()
+                    status_info.info("Loading Whisper model into memory...")
                     model = WhisperModel(model_size, device=device, compute_type=compute_type)
+                    
+                    status_info.info("Analyzing audio stream...")
                     segments, info = model.transcribe(temp_path, beam_size=1)
                     
-                    # Collect text
-                    full_transcript = [segment.text.strip() for segment in segments if segment.text.strip()]
+                    st.success(f"Audio loaded ({info.duration:.1f} seconds). Detected language: **'{info.language}'** (probability {info.language_probability:.2f})")
+                    
+                    # Create UI containers for live streaming
+                    progress_bar = st.progress(0.0)
+                    status_text = st.empty()
+                    live_box = st.empty()
+                    
+                    full_transcript = []
+                    
+                    for segment in segments:
+                        text = segment.text.strip()
+                        if text:
+                            full_transcript.append(text)
+                        
+                        # Calculate progress percentage
+                        if info.duration > 0:
+                            progress = min(segment.end / info.duration, 1.0)
+                            progress_bar.progress(progress)
+                            status_text.markdown(f"⏳ **Transcribing:** `{int(progress * 100)}%` completed ({int(segment.end)}s / {int(info.duration)}s)")
+                        
+                        # Live streaming text update
+                        current_text = "\n\n".join(full_transcript)
+                        live_box.text_area("Live Transcript Progress", current_text, height=300)
+                    
                     final_text = "\n\n".join(full_transcript)
+                    progress_bar.progress(1.0)
+                    status_text.success("🎉 Transcription complete!")
                     
                     if final_text:
-                        st.success(f"Transcription complete! (Detected language: '{info.language}' with probability {info.language_probability:.2f})")
-                        
-                        # Display text in a clean box
-                        st.text_area("Transcript Result", final_text, height=300)
-                        
-                        # Download button
+                        # Download button for completed transcript
                         st.download_button(
-                            label="Download Transcript as Text File",
+                            label="📥 Download Full Transcript (.txt)",
                             data=final_text,
                             file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
                             mime="text/plain"

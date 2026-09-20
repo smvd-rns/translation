@@ -1,21 +1,24 @@
-��# Audio & Video Transcription App 🎙️
+# Audio & Video Transcription App 🎙️
 
 A Streamlit application using `faster-whisper` for fast audio/video transcription.
 
-## Deploying on Render (Docker Recommended)
+## Deploying on Render Free Tier
 
-### Why Docker is Required for Render
-1. **System Dependencies:** `faster-whisper` requires `ffmpeg` to process audio/video files. Render's standard Python environment does not include `ffmpeg` by default.
-2. **Port Binding:** Streamlit must listen on `0.0.0.0` and port `$PORT`.
+### YES! This app works on Render Free Tier.
 
-### Steps to Deploy on Render:
+To ensure it runs without any memory issues on Render's 512 MB Free Tier limit:
+
+1. **Select Model Size:** Use **`tiny`** or **`base`** in the app's dropdown.
+   - `tiny`: Uses ~150 MB RAM (Very fast & reliable on free server)
+   - `base`: Uses ~250 MB RAM (Higher accuracy, fits in free memory)
+   - *Avoid `small` or `medium` on the free tier as they require >1 GB RAM.*
+
+2. **Deployment Method:** Docker deployment (Render will auto-detect the `Dockerfile` in this repo).
+
+### Steps to Deploy:
 1. Push this repository to GitHub.
-2. Log into [Render Dashboard](https://dashboard.render.com/).
+2. Go to [Render Dashboard](https://dashboard.render.com/).
 3. Click **New +** -> **Web Service**.
 4. Connect your GitHub repository.
-5. Select **Docker** as the Environment (Render auto-detects the `Dockerfile`).
-6. Set **Plan** to **Free** (or your preferred tier).
-7. Click **Create Web Service**.
-
-> ⚠️ **Memory Warning for Render Free Tier (512MB RAM):**
-> Select **`tiny`** or **`base`** model size in the web app UI. Larger models (`small`, `medium`require >1GB RAM and may cause Out-Of-Memory (OOM) crashes on free instances.
+5. Environment will be auto-detected as **Docker**.
+6. Select **Free Tier** and click **Create Web Service**.
