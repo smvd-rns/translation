@@ -25,23 +25,23 @@ st.set_page_config(
 st.title("🎙️ Audio & Video Transcription App")
 st.write("Upload an audio or video file to generate a transcript — powered by Google Gemini AI.")
 
-# ── Sidebar: API Key ─────────────────────────────────────────────────────────
-st.sidebar.title("⚙️ Settings")
-st.sidebar.markdown(
-    "Get your **free** Gemini API key at "
-    "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)"
-)
+# ── API Key Configuration ─────────────────────────────────────────────────────
+api_key = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"")
 
-env_api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-user_api_key = st.sidebar.text_input(
-    "Gemini API Key",
-    value=env_api_key,
-    type="password",
-    placeholder="AQ... or AIza...",
-    help="Enter your API key from aistudio.google.com/apikey"
-)
-
-api_key = user_api_key.strip().strip("'\"")
+# If key is not in environment, allow user to input it via sidebar
+if not api_key:
+    st.sidebar.title("⚙️ Settings")
+    st.sidebar.markdown(
+        "Get your **free** Gemini API key at "
+        "[aistudio.google.com/apikey](https://aistudio.google.com/apikey)"
+    )
+    user_api_key = st.sidebar.text_input(
+        "Gemini API Key",
+        type="password",
+        placeholder="AQ... or AIza...",
+        help="Enter your API key from aistudio.google.com/apikey"
+    )
+    api_key = user_api_key.strip().strip("'\"")
 
 if not api_key:
     st.info(
@@ -181,6 +181,8 @@ if uploaded_file is not None:
                 start_time = time.time()
 
                 # ── Step 3: Process chunks sequentially ───────────────────────
+                fallback_models = [model_choice, "gemini-2.5-flash", "gemini-3.8-flash"]
+
                 for idx, chunk_path in enumerate(chunk_files):
                     chunk_num = idx + 1
                     chunk_size_mb = os.path.getsize(chunk_path) / (1024 * 1024)
@@ -197,117 +199,90 @@ if uploaded_file is not None:
 
                     status_box.info(f"📤 Processing Chunk **{chunk_num} of {total_chunks}** ({eta_str})...")
                     log(f"--- Chunk {chunk_num}/{total_chunks} ({chunk_size_mb:.1f} MB) ---")
-                    log(f"Uploading chunk {chunk_num} to Gemini Files API...")
 
-                    if USE_NEW_SDK:
-                        audio_file = client.files.upload(file=chunk_path)
-                        log(f"Uploaded to Gemini. Storage ID: {audio_file.name}")
+                    response = None
+                    max_retries = 4
 
-                        # Poll for processing status if needed
-                        wait_count = 0
-                        while hasattr(audio_file, 'state') and str(getattr(audio_file.state, 'name', audio_file.state)) == "PROCESSING":
-                            log(f"Gemini processing chunk audio... (waiting {wait_count*2}s)")
-                            time.sleep(2)
-                            audio_file = client.files.get(name=audio_file.name)
-                            wait_count += 1
-                            if wait_count > 30:
-                                log(f"❌ Error: Chunk {chunk_num} processing timed out.")
-                                st.error(f"Chunk {chunk_num} processing timed out.")
-                                st.stop()
+                    for attempt in range(max_retries):
+                        current_model = fallback_models[attempt % len(fallback_models)]
+                        audio_file = None
 
-                        log(f"🧠 Transcribing speech with gemini-3.5-flash-lite (temp=0.0)...")
-                        
                         try:
-                            # Robust Retry Loop for 503 (High Demand) & 429 Rate Limits
-                            response = None
-                            max_retries = 5
-                            for attempt in range(max_retries):
-                                try:
-                                    config = types.GenerateContentConfig(
-                                        temperature=0.0,
-                                        system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
-                                    )
-                                    response = client.models.generate_content(
-                                        model=model_choice,
-                                        contents=[audio_file, prompt],
-                                        config=config
-                                    )
-                                    break  # Success
-                                except Exception as err:
-                                    err_msg = str(err)
-                                    if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
-                                        wait_sec = (attempt + 1) * 8
-                                        log(f"⚠️ Google server busy (503). Retrying chunk {chunk_num} in {wait_sec}s (Attempt {attempt+1}/{max_retries})...")
-                                        time.sleep(wait_sec)
-                                    else:
-                                        raise err
+                            log(f"Uploading chunk {chunk_num} to Gemini (using {current_model})...")
+                            
+                            if USE_NEW_SDK:
+                                audio_file = client.files.upload(file=chunk_path)
+                                log(f"Uploaded. Storage ID: {audio_file.name}")
+
+                                # Poll for processing status if needed
+                                wait_count = 0
+                                while hasattr(audio_file, 'state') and str(getattr(audio_file.state, 'name', audio_file.state)) == "PROCESSING":
+                                    time.sleep(2)
+                                    audio_file = client.files.get(name=audio_file.name)
+                                    wait_count += 1
+                                    if wait_count > 20:
+                                        break
+
+                                log(f"🧠 Transcribing speech with {current_model}...")
+                                config = types.GenerateContentConfig(
+                                    temperature=0.0,
+                                    system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
+                                )
+                                response = client.models.generate_content(
+                                    model=current_model,
+                                    contents=[audio_file, prompt],
+                                    config=config
+                                )
+                            else:
+                                audio_file = legacy_genai.upload_file(path=chunk_path)
+                                log(f"Uploaded. Storage ID: {audio_file.name}")
+
+                                wait_count = 0
+                                while audio_file.state.name == "PROCESSING":
+                                    time.sleep(2)
+                                    audio_file = legacy_genai.get_file(audio_file.name)
+                                    wait_count += 1
+                                    if wait_count > 20:
+                                        break
+
+                                log(f"🧠 Transcribing speech with {current_model}...")
+                                model = legacy_genai.GenerativeModel(
+                                    model_name=current_model,
+                                    generation_config={"temperature": 0.0}
+                                )
+                                response = model.generate_content(
+                                    [prompt, audio_file],
+                                    request_options={"timeout": 600}
+                                )
 
                             if response and response.text:
                                 text_chunk = response.text.strip()
                                 transcripts.append(text_chunk)
                                 words = len(text_chunk.split())
                                 log(f"✅ Chunk {chunk_num} complete! Transcribed {words} words.")
+                                break  # Success! Exit retry loop
+
+                        except Exception as err:
+                            err_msg = str(err)
+                            if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
+                                next_model = fallback_models[(attempt + 1) % len(fallback_models)]
+                                log(f"⚠️ {current_model} server busy (503). Switching to '{next_model}' (Attempt {attempt+2}/{max_retries})...")
+                                time.sleep(3)
                             else:
-                                log(f"⚠️ Chunk {chunk_num} returned empty transcript.")
+                                if attempt == max_retries - 1:
+                                    st.error(f"Error processing chunk {chunk_num}: {err}")
+                                    raise err
+                                time.sleep(3)
                         finally:
-                            log(f"🧹 Deleting chunk file from Gemini cloud storage...")
-                            try:
-                                client.files.delete(name=audio_file.name)
-                            except Exception:
-                                pass
-                    else:
-                        audio_file = legacy_genai.upload_file(path=chunk_path)
-                        log(f"Uploaded to Gemini. Storage ID: {audio_file.name}")
-
-                        wait_count = 0
-                        while audio_file.state.name == "PROCESSING":
-                            log(f"Gemini processing chunk audio... (waiting {wait_count*2}s)")
-                            time.sleep(2)
-                            audio_file = legacy_genai.get_file(audio_file.name)
-                            wait_count += 1
-                            if wait_count > 30:
-                                log(f"❌ Error: Chunk {chunk_num} processing timed out.")
-                                st.error(f"Chunk {chunk_num} processing timed out.")
-                                st.stop()
-
-                        log(f"🧠 Transcribing speech with gemini-3.5-flash-lite (temp=0.0)...")
-                        
-                        try:
-                            response = None
-                            max_retries = 5
-                            for attempt in range(max_retries):
+                            # Clean up file on every attempt to prevent stale handles
+                            if audio_file:
                                 try:
-                                    model = legacy_genai.GenerativeModel(
-                                        model_name=model_choice,
-                                        generation_config={"temperature": 0.0}
-                                    )
-                                    response = model.generate_content(
-                                        [prompt, audio_file],
-                                        request_options={"timeout": 600}
-                                    )
-                                    break  # Success
-                                except Exception as err:
-                                    err_msg = str(err)
-                                    if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
-                                        wait_sec = (attempt + 1) * 8
-                                        log(f"⚠️ Google server busy (503). Retrying chunk {chunk_num} in {wait_sec}s (Attempt {attempt+1}/{max_retries})...")
-                                        time.sleep(wait_sec)
+                                    if USE_NEW_SDK:
+                                        client.files.delete(name=audio_file.name)
                                     else:
-                                        raise err
-
-                            if response and response.text:
-                                text_chunk = response.text.strip()
-                                transcripts.append(text_chunk)
-                                words = len(text_chunk.split())
-                                log(f"✅ Chunk {chunk_num} complete! Transcribed {words} words.")
-                            else:
-                                log(f"⚠️ Chunk {chunk_num} returned empty transcript.")
-                        finally:
-                            log(f"🧹 Deleting chunk file from Gemini cloud storage...")
-                            try:
-                                legacy_genai.delete_file(audio_file.name)
-                            except Exception:
-                                pass
+                                        legacy_genai.delete_file(audio_file.name)
+                                except Exception:
+                                    pass
 
                     # Update live transcript preview after each chunk!
                     current_combined = "\n\n".join(transcripts)
