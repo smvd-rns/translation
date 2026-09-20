@@ -11,8 +11,8 @@ WORKDIR /app
 # Copy requirement files first for layer caching
 COPY requirements.txt .
 
-# Install CPU version of PyTorch to keep image lightweight & fit memory limits
-RUN pip install --no-cache-dir -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cpu
+# Install python dependencies without heavy PyTorch
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy remaining project files
 COPY . .

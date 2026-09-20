@@ -77,7 +77,7 @@ try:
 
                     # 3. Load Whisper Model
                     status_info.info(f"🧠 Loading Whisper model ('{model_size}') into memory...")
-                    model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=2)
+                    model = WhisperModel(model_size, device=device, compute_type=compute_type, cpu_threads=2, num_workers=1)
                     
                     # 4. Transcribe with VAD filtering enabled
                     status_info.info("🔄 Detecting language & setting up VAD stream...")
