@@ -5,6 +5,7 @@ import time
 import tempfile
 import subprocess
 import traceback
+import requests
 import streamlit as st
 
 # Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
@@ -23,12 +24,12 @@ st.set_page_config(
 )
 
 st.title("🎙️ Audio & Video Transcription App")
-st.write("Upload an audio or video file to generate a transcript — powered by Google Gemini AI.")
+st.write("Upload an audio or video file to generate a transcript — powered by Google Gemini AI & Groq Whisper.")
 
 # ── API Key Configuration ─────────────────────────────────────────────────────
 api_key = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"")
+groq_api_key = os.environ.get("GROQ_API_KEY", "").strip().strip("'\"")
 
-# If key is not in environment, allow user to input it via sidebar
 if not api_key:
     st.sidebar.title("⚙️ Settings")
     st.sidebar.markdown(
@@ -43,17 +44,38 @@ if not api_key:
     )
     api_key = user_api_key.strip().strip("'\"")
 
-if not api_key:
+if not groq_api_key:
+    groq_input = st.sidebar.text_input(
+        "Groq API Key (Optional Ultra-Fast Backup)",
+        type="password",
+        placeholder="gsk_...",
+        help="Free key from console.groq.com — transcribes chunks in 2 seconds!"
+    )
+    groq_api_key = groq_input.strip().strip("'\"")
+
+if not api_key and not groq_api_key:
     st.info(
-        "👈 Enter your **Gemini API Key** in the sidebar to get started.\n\n"
-        "🔑 Get a free key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey) — takes 30 seconds."
+        "👈 Enter your **Gemini API Key** or **Groq API Key** in the sidebar to get started."
     )
     st.stop()
 
-if USE_NEW_SDK:
+if USE_NEW_SDK and api_key:
     client = genai.Client(api_key=api_key)
-else:
+elif api_key:
     legacy_genai.configure(api_key=api_key)
+
+def transcribe_with_groq(chunk_path, key):
+    """Transcribes audio using Groq Whisper API (whisper-large-v3-turbo)."""
+    url = "https://api.groq.com/openai/v1/audio/transcriptions"
+    headers = {"Authorization": f"Bearer {key}"}
+    with open(chunk_path, "rb") as f:
+        files = {"file": (os.path.basename(chunk_path), f, "audio/mp3")}
+        data = {"model": "whisper-large-v3-turbo"}
+        resp = requests.post(url, headers=headers, files=files, data=data, timeout=120)
+        if resp.status_code == 200:
+            return resp.json().get("text", "")
+        else:
+            raise Exception(f"Groq API Error {resp.status_code}: {resp.text}")
 
 # ── File uploader ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
@@ -162,7 +184,7 @@ if uploaded_file is not None:
                         except Exception:
                             break
                     if updated:
-                        log_box.code("\n".join(logs[-15:]), language="text")
+                        log_box.code("\n".join(logs[-40:]), language="text")
 
                 # ── Step 1: Save uploaded file ────────────────────────────────
                 status_box.info("💾 Step 1/3: Saving uploaded file to local memory...")
@@ -198,7 +220,12 @@ if uploaded_file is not None:
                 log("⚡ Launching Parallel Processing (3 concurrent workers for max speed)...")
                 import concurrent.futures
 
-                fallback_models = [model_choice, "gemini-3.5-flash", "gemini-3.0-flash"]
+                fallback_models = [model_choice, "gemini-3.5-flash"]
+                if groq_api_key:
+                    fallback_models.append("groq-whisper")
+                else:
+                    fallback_models.append("gemini-3.0-flash")
+
                 transcripts_dict = {}
                 completed_count = 0
 
@@ -215,6 +242,15 @@ if uploaded_file is not None:
                         audio_file = None
 
                         try:
+                            # 🚀 Groq Whisper Fast Path
+                            if current_model == "groq-whisper" and groq_api_key:
+                                log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (whisper-large-v3-turbo)...")
+                                text_chunk = transcribe_with_groq(chunk_path, groq_api_key)
+                                if text_chunk:
+                                    words = len(text_chunk.split())
+                                    log(f"⚡ [Chunk {chunk_num}/{total_chunks}] Groq complete in 2s! Transcribed {words} words.")
+                                    return (idx, text_chunk)
+
                             log(f"[Chunk {chunk_num}/{total_chunks}] Uploading to Gemini ({current_model})...")
                             
                             if USE_NEW_SDK:
@@ -230,8 +266,10 @@ if uploaded_file is not None:
                                         break
 
                                 log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
+                                # Capped max_output_tokens=3000 to prevent infinite hallucination loop stalls
                                 config = types.GenerateContentConfig(
                                     temperature=0.0,
+                                    max_output_tokens=3000,
                                     system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
                                 )
                                 response = client.models.generate_content(
@@ -254,7 +292,7 @@ if uploaded_file is not None:
                                 log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
                                 model = legacy_genai.GenerativeModel(
                                     model_name=current_model,
-                                    generation_config={"temperature": 0.0}
+                                    generation_config={"temperature": 0.0, "max_output_tokens": 3000}
                                 )
                                 response = model.generate_content(
                                     [prompt, audio_file],
