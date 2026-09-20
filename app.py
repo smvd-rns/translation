@@ -10,6 +10,7 @@ import streamlit as st
 # Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
 try:
     from google import genai
+    from google.genai import types
     USE_NEW_SDK = True
 except ImportError:
     import google.generativeai as legacy_genai
