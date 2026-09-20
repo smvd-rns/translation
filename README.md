@@ -1,24 +1,20 @@
-# Audio & Video Transcription App 🎙️
+��# Audio & Video Transcription App 🎙️
 
-A Streamlit application using `faster-whisper` for fast audio/video transcription.
+A Streamlit app that transcribes audio/video files using the **Groq Whisper API** (runs on remote GPU — zero local RAM needed).
 
-## Deploying on Render Free Tier
+## How to Deploy Free on Streamlit Community Cloud
 
-### YES! This app works on Render Free Tier.
+1. Push this repo to GitHub
+2. Go to [share.streamlit.io](https://share.streamlit.io→ Sign in with GitHub
+3. Click **New app** → Select your repo → Set `app.py` as the main file
+4. Under **Advanced settings → Secrets**, add:
+   ```
+   GROQ_API_KEY = "gsk_your_key_here"
+   ```
+5. Click **Deploy** — done!
 
-To ensure it runs without any memory issues on Render's 512 MB Free Tier limit:
+## Get a Free Groq API Key
 
-1. **Select Model Size:** Use **`tiny`** or **`base`** in the app's dropdown.
-   - `tiny`: Uses ~150 MB RAM (Very fast & reliable on free server)
-   - `base`: Uses ~250 MB RAM (Higher accuracy, fits in free memory)
-   - *Avoid `small` or `medium` on the free tier as they require >1 GB RAM.*
-
-2. **Deployment Method:** Docker deployment (Render will auto-detect the `Dockerfile` in this repo).
-
-### Steps to Deploy:
-1. Push this repository to GitHub.
-2. Go to [Render Dashboard](https://dashboard.render.com/).
-3. Click **New +** -> **Web Service**.
-4. Connect your GitHub repository.
-5. Environment will be auto-detected as **Docker**.
-6. Select **Free Tier** and click **Create Web Service**.
+1. Go to [console.groq.com](https://console.groq.com)
+2. Sign up free → Click **API Keys** → **Create API Key**
+3. Copy the key (starts with `gsk_...`
