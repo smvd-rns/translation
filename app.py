@@ -54,8 +54,9 @@ try:
                     status_info.info("Loading Whisper model into memory...")
                     model = WhisperModel(model_size, device=device, compute_type=compute_type)
                     
-                    status_info.info("Analyzing audio stream...")
+                    status_info.info("🔄 Decoding audio file & detecting language (takes ~15-30s for large files)...")
                     segments, info = model.transcribe(temp_path, beam_size=1)
+                    status_info.empty()
                     
                     st.success(f"Audio loaded ({info.duration:.1f} seconds). Detected language: **'{info.language}'** (probability {info.language_probability:.2f})")
                     
