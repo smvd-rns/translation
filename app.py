@@ -6,7 +6,14 @@ import tempfile
 import subprocess
 import traceback
 import streamlit as st
-import google.generativeai as genai
+
+# Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
+try:
+    from google import genai
+    USE_NEW_SDK = True
+except ImportError:
+    import google.generativeai as legacy_genai
+    USE_NEW_SDK = False
 
 st.set_page_config(
     page_title="Audio & Video Transcription App",
@@ -29,7 +36,7 @@ user_api_key = st.sidebar.text_input(
     "Gemini API Key",
     value=env_api_key,
     type="password",
-    placeholder="AIzaSy...",
+    placeholder="AQ... or AIza...",
     help="Enter your API key from aistudio.google.com/apikey"
 )
 
@@ -42,10 +49,10 @@ if not api_key:
     )
     st.stop()
 
-if not api_key.startswith("AIza"):
-    st.sidebar.warning("⚠️ Google Gemini API keys usually start with 'AIza...'. Please check your key at aistudio.google.com/apikey")
-
-genai.configure(api_key=api_key)
+if USE_NEW_SDK:
+    client = genai.Client(api_key=api_key)
+else:
+    legacy_genai.configure(api_key=api_key)
 
 # ── File uploader ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
@@ -124,7 +131,6 @@ if uploaded_file is not None:
                 status.info(f"✅ Prepared **{total_chunks} chunk(s)** for processing.")
 
                 transcripts = []
-                model = genai.GenerativeModel(model_name=model_choice)
 
                 prompt = (
                     "Please transcribe all the speech in this audio file. "
@@ -137,37 +143,59 @@ if uploaded_file is not None:
                     chunk_num = idx + 1
                     status.info(f"📤 [Chunk {chunk_num}/{total_chunks}] Uploading to Gemini API...")
                     
-                    audio_file = genai.upload_file(path=chunk_path)
+                    if USE_NEW_SDK:
+                        audio_file = client.files.upload(file=chunk_path)
+                        
+                        # Wait for processing if needed
+                        wait_count = 0
+                        while hasattr(audio_file, 'state') and str(getattr(audio_file.state, 'name', audio_file.state)) == "PROCESSING":
+                            time.sleep(2)
+                            audio_file = client.files.get(name=audio_file.name)
+                            wait_count += 1
+                            if wait_count > 30:
+                                st.error(f"Chunk {chunk_num} processing timed out.")
+                                st.stop()
 
-                    # Poll until processing completes
-                    wait_count = 0
-                    while audio_file.state.name == "PROCESSING":
-                        time.sleep(2)
-                        audio_file = genai.get_file(audio_file.name)
-                        wait_count += 1
-                        if wait_count > 30:
-                            st.error(f"Chunk {chunk_num} processing timed out.")
-                            st.stop()
-
-                    if audio_file.state.name == "FAILED":
-                        st.error(f"Gemini failed to process chunk {chunk_num}.")
-                        st.stop()
-
-                    status.info(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing speech...")
-                    
-                    try:
-                        response = model.generate_content(
-                            [prompt, audio_file],
-                            request_options={"timeout": 600}
-                        )
-                        if response and response.text:
-                            transcripts.append(response.text.strip())
-                    finally:
-                        # Always clean up file from Gemini storage
+                        status.info(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing speech...")
+                        
                         try:
-                            genai.delete_file(audio_file.name)
-                        except Exception:
-                            pass
+                            response = client.models.generate_content(
+                                model=model_choice,
+                                contents=[audio_file, prompt]
+                            )
+                            if response and response.text:
+                                transcripts.append(response.text.strip())
+                        finally:
+                            try:
+                                client.files.delete(name=audio_file.name)
+                            except Exception:
+                                pass
+                    else:
+                        audio_file = legacy_genai.upload_file(path=chunk_path)
+
+                        wait_count = 0
+                        while audio_file.state.name == "PROCESSING":
+                            time.sleep(2)
+                            audio_file = legacy_genai.get_file(audio_file.name)
+                            wait_count += 1
+                            if wait_count > 30:
+                                st.error(f"Chunk {chunk_num} processing timed out.")
+                                st.stop()
+
+                        status.info(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing speech...")
+                        model = legacy_genai.GenerativeModel(model_name=model_choice)
+                        try:
+                            response = model.generate_content(
+                                [prompt, audio_file],
+                                request_options={"timeout": 600}
+                            )
+                            if response and response.text:
+                                transcripts.append(response.text.strip())
+                        finally:
+                            try:
+                                legacy_genai.delete_file(audio_file.name)
+                            except Exception:
+                                pass
 
                     # Update progress
                     progress_bar.progress((idx + 1) / total_chunks)
@@ -200,4 +228,5 @@ if uploaded_file is not None:
                 st.code(traceback.format_exc())
             finally:
                 gc.collect()
+
 
