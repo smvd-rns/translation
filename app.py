@@ -6,6 +6,42 @@ st.set_page_config(
     layout="centered"
 )
 
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
+
+st.markdown("""
+<style>
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+@keyframes pulse-glow {
+    0% { box-shadow: 0 0 8px rgba(255, 75, 75, 0.3); border-color: rgba(255, 75, 75, 0.5); }
+    50% { box-shadow: 0 0 20px rgba(255, 75, 75, 0.7); border-color: rgba(255, 75, 75, 0.9); }
+    100% { box-shadow: 0 0 8px rgba(255, 75, 75, 0.3); border-color: rgba(255, 75, 75, 0.5); }
+}
+.transcribing-banner {
+    background: linear-gradient(135deg, rgba(255, 75, 75, 0.12), rgba(120, 50, 255, 0.12));
+    border: 1px dashed #ff4b4b;
+    border-radius: 12px;
+    padding: 18px 22px;
+    margin: 15px 0 25px 0;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    animation: pulse-glow 2.5s infinite ease-in-out;
+}
+.loader-spinner {
+    width: 28px;
+    height: 28px;
+    border: 3px solid rgba(255, 75, 75, 0.25);
+    border-top: 3px solid #ff4b4b;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    flex-shrink: 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
 import os
 import gc
 import glob
@@ -88,13 +124,6 @@ uploaded_file = st.file_uploader(
     "Choose an audio or video file",
     type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"]
 )
-
-model_choice = st.selectbox(
-    "Select Gemini Model",
-    ["gemini-3.5-flash-lite"],
-    index=0
-)
-st.caption("💡 **gemini-3.5-flash-lite** — 500 requests/day free quota, fast, handles hours of audio.")
 
 language_options = {
     "English 🇬🇧 (en)": "en",
@@ -187,7 +216,36 @@ if uploaded_file is not None:
 
     st.caption(f"📁 File size: **{file_size_mb:.1f} MB**")
 
-    if st.button("Start Transcription", type="primary"):
+    if "transcribing" not in st.session_state:
+        st.session_state.transcribing = False
+
+    btn_container = st.empty()
+
+    if st.session_state.transcribing:
+        btn_container.button("⏳ Transcription in Progress...", disabled=True, type="secondary")
+        start_clicked = False
+    else:
+        start_clicked = btn_container.button("Start Transcription", type="primary")
+
+    if start_clicked:
+        st.session_state.transcribing = True
+        btn_container.button("⏳ Transcription in Progress...", disabled=True, type="secondary")
+
+        progress_banner = st.empty()
+        progress_banner.markdown("""
+        <div class="transcribing-banner">
+            <div class="loader-spinner"></div>
+            <div>
+                <div style="font-weight: 700; font-size: 1.05rem; color: #ff4b4b; display: flex; align-items: center; gap: 8px;">
+                    ⚡ Transcription in Progress...
+                </div>
+                <div style="font-size: 0.88rem; color: #dddddd; margin-top: 4px;">
+                    Your file is being uploaded, sliced into chunks, and processed in real-time. Please stay on this page.
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
         suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -263,9 +321,9 @@ if uploaded_file is not None:
                 import concurrent.futures
 
                 if groq_keys:
-                    fallback_models = ["groq-whisper", model_choice, "gemini-3.5-flash"]
+                    fallback_models = ["groq-whisper", DEFAULT_GEMINI_MODEL, "gemini-3.5-flash"]
                 else:
-                    fallback_models = [model_choice, "gemini-3.5-flash", "gemini-3.0-flash"]
+                    fallback_models = [DEFAULT_GEMINI_MODEL, "gemini-3.5-flash", "gemini-3.0-flash"]
 
                 transcripts_dict = {}
                 completed_count = 0
@@ -419,6 +477,9 @@ if uploaded_file is not None:
                 st.error(f"Error: {e}")
                 st.code(traceback.format_exc())
             finally:
+                st.session_state.transcribing = False
+                if 'progress_banner' in locals():
+                    progress_banner.empty()
                 gc.collect()
 
 
