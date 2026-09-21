@@ -122,27 +122,12 @@ def transcribe_with_groq(chunk_path, key, language=None):
         else:
             raise Exception(f"Groq API Error {resp.status_code}: {resp.text}")
 
-# ── File uploader & Audio Compressor ─────────────────────────────────────────
-component_dir = os.path.join(os.path.dirname(__file__), ".streamlit", "components", "browser_compressor")
-browser_compressor = components.declare_component("browser_compressor", path=component_dir)
-
-tab_compressor, tab_direct = st.tabs([
-    "⚡ Fast Audio/Video Compressor (Any File Size)",
-    "📁 Standard Upload (Max 30 MB)"
-])
-
-compressed_result = None
-direct_file = None
-
-with tab_compressor:
-    compressed_result = browser_compressor()
-
-with tab_direct:
-    direct_file = st.file_uploader(
-        "Choose an audio or video file (Max 30 MB)",
-        type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
-        help="Maximum file size for direct upload is 30 MB."
-    )
+# ── File uploader ─────────────────────────────────────────────────────────────
+uploaded_file = st.file_uploader(
+    "Choose an audio or video file (Supports files up to 500 MB)",
+    type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
+    help="Select any audio or video file. Large files are automatically compressed in seconds."
+)
 
 language_options = {
     "English 🇬🇧 (en)": "en",
@@ -225,44 +210,23 @@ def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
     
     return [input_path]
 
-# Determine active file payload
-active_file_bytes = None
-active_file_name = None
-file_size_mb = 0.0
+if uploaded_file is not None:
+    file_size_mb = uploaded_file.size / (1024 * 1024)
 
-if compressed_result and isinstance(compressed_result, dict) and compressed_result.get("base64"):
-    active_file_name = compressed_result.get("name", "compressed_audio.mp3")
-    active_file_bytes = base64.b64decode(compressed_result["base64"])
-    file_size_mb = len(active_file_bytes) / (1024 * 1024)
-    orig_mb = compressed_result.get("originalSizeMb", "?")
-    
-    st.success(
-        f"⚡ **Compressed Audio Ready!**\n\n"
-        f"📁 `{active_file_name}` | Size: **{file_size_mb:.1f} MB** (Compressed from **{orig_mb} MB** original file)"
-    )
-    st.audio(active_file_bytes, format="audio/mp3")
-
-elif direct_file is not None:
-    active_file_name = direct_file.name
-    active_file_bytes = direct_file.getbuffer()
-    file_size_mb = direct_file.size / (1024 * 1024)
-
-    if direct_file.type.startswith("audio"):
-        st.audio(direct_file)
-    elif direct_file.type.startswith("video"):
-        st.video(direct_file)
+    if uploaded_file.type.startswith("audio"):
+        st.audio(uploaded_file)
+    elif uploaded_file.type.startswith("video"):
+        st.video(uploaded_file)
 
     st.caption(f"📁 File size: **{file_size_mb:.1f} MB**")
 
-    MAX_FILE_SIZE_MB = 30
+    MAX_FILE_SIZE_MB = 500
     if file_size_mb > MAX_FILE_SIZE_MB:
         st.error(
-            f"⚠️ **Direct File Size Limit Exceeded ({file_size_mb:.1f} MB / Max {MAX_FILE_SIZE_MB} MB)**\n\n"
-            f"Please switch to the **'⚡ Fast Audio/Video Compressor'** tab above to compress your file."
+            f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max {MAX_FILE_SIZE_MB} MB)**\n\n"
+            f"Please select a file under **500 MB**."
         )
         st.stop()
-
-if active_file_bytes is not None:
 
     if "transcribing" not in st.session_state:
         st.session_state.transcribing = False
@@ -294,7 +258,7 @@ if active_file_bytes is not None:
         </div>
         """, unsafe_allow_html=True)
 
-        suffix = os.path.splitext(active_file_name)[1] or ".mp3"
+        suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             original_path = os.path.join(tmp_dir, "input" + suffix)
@@ -328,16 +292,16 @@ if active_file_bytes is not None:
                     if updated:
                         log_box.code("\n".join(logs[-40:]), language="text")
 
-                # ── Step 1: Save uploaded file ────────────────────────────────
-                status_box.info("💾 Step 1/3: Saving file to local memory...")
-                log(f"Saving '{active_file_name}' ({file_size_mb:.1f} MB)...")
+                # ── Step 1: Save uploaded file & auto-compress ─────────────────
+                status_box.info("💾 Step 1/3: Saving file & optimizing audio stream...")
+                log(f"Saving '{uploaded_file.name}' ({file_size_mb:.1f} MB)...")
                 flush_logs()
                 with open(original_path, "wb") as f:
-                    f.write(active_file_bytes)
+                    f.write(uploaded_file.getbuffer())
                 log("Saved file successfully.")
                 flush_logs()
 
-                # Fast ffmpeg audio track extraction & compression to 16kHz mono 32kbps MP3 (<3MB)
+                # Fast ffmpeg audio track extraction & compression to 16kHz mono 32kbps MP3 (< 5MB)
                 compressed_path = os.path.join(tmp_dir, "compressed.mp3")
                 cmd_compress = [
                     "ffmpeg", "-y", "-i", original_path,
@@ -345,17 +309,17 @@ if active_file_bytes is not None:
                     compressed_path
                 ]
                 try:
-                    log("⚡ Optimizing audio stream with ffmpeg...")
+                    log("⚡ Compressing audio stream to 32kbps Mono MP3 (< 5 MB)...")
                     flush_logs()
                     subprocess.run(cmd_compress, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
                     if os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
                         c_mb = os.path.getsize(compressed_path) / (1024 * 1024)
-                        log(f"⚡ Audio stream ready! Optimized size: {c_mb:.1f} MB.")
+                        log(f"⚡ Compression complete! Reduced file size from {file_size_mb:.1f} MB to {c_mb:.1f} MB.")
                         processing_path = compressed_path
                     else:
                         processing_path = original_path
                 except Exception as c_err:
-                    log(f"Optimization note: using original file ({c_err}).")
+                    log(f"Compression note: using original file ({c_err}).")
                     processing_path = original_path
                 flush_logs()
 
@@ -364,6 +328,7 @@ if active_file_bytes is not None:
                 log(f"Running ffmpeg to split audio into {chunk_duration}-minute chunks...")
                 
                 chunk_files = chunk_media_file(processing_path, tmp_dir, chunk_minutes=chunk_duration)
+
 
 
                 total_chunks = len(chunk_files)
