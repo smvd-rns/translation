@@ -124,9 +124,9 @@ def transcribe_with_groq(chunk_path, key, language=None):
 
 # ── File uploader ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
-    "Choose an audio or video file (Supports files up to 500 MB)",
+    "Choose an audio or video file (Max 30 MB)",
     type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
-    help="Select any audio or video file. Large files are automatically compressed in seconds."
+    help="Maximum file size supported on Render Free Tier is 30 MB."
 )
 
 language_options = {
@@ -220,11 +220,12 @@ if uploaded_file is not None:
 
     st.caption(f"📁 File size: **{file_size_mb:.1f} MB**")
 
-    MAX_FILE_SIZE_MB = 500
+    MAX_FILE_SIZE_MB = 30
     if file_size_mb > MAX_FILE_SIZE_MB:
         st.error(
-            f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max {MAX_FILE_SIZE_MB} MB)**\n\n"
-            f"Please select a file under **500 MB**."
+            f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max 30 MB)**\n\n"
+            f"Your uploaded file is **{file_size_mb:.1f} MB**, which exceeds the maximum allowed limit of **30 MB**.\n\n"
+            f"💡 Please select an audio or video file smaller than **30 MB**."
         )
         st.stop()
 
