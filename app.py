@@ -502,7 +502,7 @@ if uploaded_file is not None:
                     st.download_button(
                         label="📥 Download Complete Transcript (.txt)",
                         data=final_text,
-                        file_name=f"{os.path.splitext(active_file_name)[0]}_transcript.txt",
+                        file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
                         mime="text/plain"
                     )
                 else:
