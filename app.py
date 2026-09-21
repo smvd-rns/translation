@@ -225,7 +225,11 @@ if uploaded_file is not None:
         st.error(
             f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max 30 MB)**\n\n"
             f"Your uploaded file is **{file_size_mb:.1f} MB**, which exceeds the maximum allowed limit of **30 MB**.\n\n"
-            f"💡 Please select an audio or video file smaller than **30 MB**."
+            f"💡 **Free Online Tools to shrink your audio/video file under 30 MB:**\n"
+            f"- 🌐 [FreeConvert Audio Compressor](https://www.freeconvert.com/audio-compressor)\n"
+            f"- 🌐 [Online Audio Converter & Compressor](https://online-audio-converter.com/)\n"
+            f"- 🌐 [MP3Smaller Compressor](https://www.mp3smaller.com/)\n"
+            f"- 🌐 [Clideo Audio Compressor](https://clideo.com/compress-audio)"
         )
         st.stop()
 
