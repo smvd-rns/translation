@@ -126,8 +126,19 @@ def transcribe_with_groq(chunk_path, key, language=None):
 uploaded_file = st.file_uploader(
     "Choose an audio or video file (Max 30 MB)",
     type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
-    help="Maximum file size supported on Render Free Tier is 30 MB."
+    help="Maximum file size supported is 30 MB."
 )
+
+with st.expander("💡 Have a file larger than 30 MB? Click here for quick compression steps"):
+    st.markdown(
+        "1. 🌐 Go to **[online-audio-converter.com](https://online-audio-converter.com/)**\n"
+        "2. Click **'Open files'** and select your file.\n"
+        "3. Click **'Advanced settings'**:\n"
+        "   - Set **Bitrate** to **`32 kbps`**\n"
+        "   - Set **Channels** to **`1`** (Mono)\n"
+        "4. Click **'Convert'** and download your compressed file under 30 MB! 🚀"
+    )
+
 
 language_options = {
     "English 🇬🇧 (en)": "en",
