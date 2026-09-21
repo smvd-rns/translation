@@ -121,8 +121,9 @@ def transcribe_with_groq(chunk_path, key, language=None):
 
 # ── File uploader ─────────────────────────────────────────────────────────────
 uploaded_file = st.file_uploader(
-    "Choose an audio or video file",
-    type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"]
+    "Choose an audio or video file (Max 30 MB)",
+    type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
+    help="Maximum file size supported on Render Free Tier is 30 MB to prevent Out-Of-Memory (OOM) server crashes."
 )
 
 language_options = {
@@ -215,6 +216,17 @@ if uploaded_file is not None:
         st.video(uploaded_file)
 
     st.caption(f"📁 File size: **{file_size_mb:.1f} MB**")
+
+    MAX_FILE_SIZE_MB = 30
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        st.error(
+            f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max {MAX_FILE_SIZE_MB} MB)**\n\n"
+            f"Render's Free Tier has a strict **512 MB RAM limit**. Uploading files larger than **30 MB** causes the server to run out of memory and crash.\n\n"
+            f"💡 **Solutions:**\n"
+            f"- Please compress your audio/video or split it into smaller parts under **30 MB**.\n"
+            f"- Use an MP3 converter/compressor tool (e.g. 64 kbps mono MP3 format drastically reduces file size)."
+        )
+        st.stop()
 
     if "transcribing" not in st.session_state:
         st.session_state.transcribing = False
