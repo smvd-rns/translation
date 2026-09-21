@@ -312,8 +312,8 @@ if uploaded_file is not None:
                     if updated:
                         log_box.code("\n".join(logs[-40:]), language="text")
 
-                # ── Step 1: Save uploaded file & auto-compress ─────────────────
-                status_box.info("💾 Step 1/3: Saving file & optimizing audio stream...")
+                # ── Step 1: Save uploaded file ────────────────────────────────
+                status_box.info("💾 Step 1/3: Saving uploaded file to local memory...")
                 log(f"Saving '{uploaded_file.name}' ({file_size_mb:.1f} MB)...")
                 flush_logs()
                 with open(original_path, "wb") as f:
@@ -321,33 +321,11 @@ if uploaded_file is not None:
                 log("Saved file successfully.")
                 flush_logs()
 
-                # Fast ffmpeg audio track extraction & compression to 16kHz mono 32kbps MP3 (< 5MB)
-                compressed_path = os.path.join(tmp_dir, "compressed.mp3")
-                cmd_compress = [
-                    "ffmpeg", "-y", "-i", original_path,
-                    "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k",
-                    compressed_path
-                ]
-                try:
-                    log("⚡ Compressing audio stream to 32kbps Mono MP3 (< 5 MB)...")
-                    flush_logs()
-                    subprocess.run(cmd_compress, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-                    if os.path.exists(compressed_path) and os.path.getsize(compressed_path) > 0:
-                        c_mb = os.path.getsize(compressed_path) / (1024 * 1024)
-                        log(f"⚡ Compression complete! Reduced file size from {file_size_mb:.1f} MB to {c_mb:.1f} MB.")
-                        processing_path = compressed_path
-                    else:
-                        processing_path = original_path
-                except Exception as c_err:
-                    log(f"Compression note: using original file ({c_err}).")
-                    processing_path = original_path
-                flush_logs()
-
                 # ── Step 2: Chunk media file into segments ────────────────────
                 status_box.info(f"⚡ Step 2/3: Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
                 log(f"Running ffmpeg to split audio into {chunk_duration}-minute chunks...")
                 
-                chunk_files = chunk_media_file(processing_path, tmp_dir, chunk_minutes=chunk_duration)
+                chunk_files = chunk_media_file(original_path, tmp_dir, chunk_minutes=chunk_duration)
 
 
 
