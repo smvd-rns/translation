@@ -225,11 +225,15 @@ if uploaded_file is not None:
         st.error(
             f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max 30 MB)**\n\n"
             f"Your uploaded file is **{file_size_mb:.1f} MB**, which exceeds the maximum allowed limit of **30 MB**.\n\n"
-            f"💡 **Free Online Tools to shrink your audio/video file under 30 MB:**\n"
-            f"- 🌐 [FreeConvert Audio Compressor](https://www.freeconvert.com/audio-compressor)\n"
-            f"- 🌐 [Online Audio Converter & Compressor](https://online-audio-converter.com/)\n"
-            f"- 🌐 [MP3Smaller Compressor](https://www.mp3smaller.com/)\n"
-            f"- 🌐 [Clideo Audio Compressor](https://clideo.com/compress-audio)"
+            f"--- \n\n"
+            f"### 💡 How to compress your file under 30 MB in 4 simple steps:\n\n"
+            f"1. 🌐 Go to **[online-audio-converter.com](https://online-audio-converter.com/)**\n"
+            f"2. Click **'Open files'** and select your audio or video file.\n"
+            f"3. Click **'Advanced settings'** button:\n"
+            f"   - Change **Bitrate** dropdown to **`32 kbps`**.\n"
+            f"   - Change **Channels** dropdown to **`1`** (Mono).\n"
+            f"4. Click **'Convert'** and download your compressed file *(brings files down under 30 MB even for 1.5 hour long recordings!)*.\n\n"
+            f"Once downloaded, upload your compressed file here to transcribe! 🚀"
         )
         st.stop()
 
