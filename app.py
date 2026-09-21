@@ -46,10 +46,13 @@ import os
 import gc
 import glob
 import time
+import base64
 import tempfile
 import subprocess
 import traceback
 import requests
+import streamlit.components.v1 as components
+
 
 # Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
 try:
@@ -119,12 +122,28 @@ def transcribe_with_groq(chunk_path, key, language=None):
         else:
             raise Exception(f"Groq API Error {resp.status_code}: {resp.text}")
 
-# ── File uploader ─────────────────────────────────────────────────────────────
-uploaded_file = st.file_uploader(
-    "Choose an audio or video file (Max 30 MB)",
-    type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
-    help="Maximum file size supported on Render Free Tier is 30 MB to prevent Out-Of-Memory (OOM) server crashes."
-)
+# ── File uploader & Browser Compressor ───────────────────────────────────────
+component_dir = os.path.join(os.path.dirname(__file__), ".streamlit", "components", "browser_compressor")
+browser_compressor = components.declare_component("browser_compressor", path=component_dir)
+
+tab_compressor, tab_direct = st.tabs([
+    "⚡ In-Browser Fast Compressor (Recommended — Any File Size ➔ <10MB on Device)",
+    "📁 Direct File Upload (Max 30 MB)"
+])
+
+compressed_result = None
+direct_file = None
+
+with tab_compressor:
+    st.caption("🔒 **100% Client-Side Device Compression**: Audio is decoded and compressed directly inside your browser on your device before uploading. Zero server RAM used! Long files are shrunk to **< 10 MB** in seconds.")
+    compressed_result = browser_compressor()
+
+with tab_direct:
+    direct_file = st.file_uploader(
+        "Choose an audio or video file (Max 30 MB)",
+        type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
+        help="Maximum file size supported on Render Free Tier for direct upload is 30 MB to prevent Out-Of-Memory (OOM) server crashes."
+    )
 
 language_options = {
     "English 🇬🇧 (en)": "en",
@@ -207,26 +226,45 @@ def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
     
     return [input_path]
 
-if uploaded_file is not None:
-    file_size_mb = uploaded_file.size / (1024 * 1024)
+# Determine active file payload
+active_file_bytes = None
+active_file_name = None
+file_size_mb = 0.0
 
-    if uploaded_file.type.startswith("audio"):
-        st.audio(uploaded_file)
-    elif uploaded_file.type.startswith("video"):
-        st.video(uploaded_file)
+if compressed_result and isinstance(compressed_result, dict) and compressed_result.get("base64"):
+    active_file_name = compressed_result.get("name", "compressed_audio.mp3")
+    active_file_bytes = base64.b64decode(compressed_result["base64"])
+    file_size_mb = len(active_file_bytes) / (1024 * 1024)
+    orig_mb = compressed_result.get("originalSizeMb", "?")
+    
+    st.success(
+        f"⚡ **In-Browser Compressed Audio Ready!**\n\n"
+        f"📁 File: `{active_file_name}` | Size: **{file_size_mb:.1f} MB** (Compressed on your device from **{orig_mb} MB** original file!)"
+    )
+    st.audio(active_file_bytes, format="audio/mp3")
+
+elif direct_file is not None:
+    active_file_name = direct_file.name
+    active_file_bytes = direct_file.getbuffer()
+    file_size_mb = direct_file.size / (1024 * 1024)
+
+    if direct_file.type.startswith("audio"):
+        st.audio(direct_file)
+    elif direct_file.type.startswith("video"):
+        st.video(direct_file)
 
     st.caption(f"📁 File size: **{file_size_mb:.1f} MB**")
 
     MAX_FILE_SIZE_MB = 30
     if file_size_mb > MAX_FILE_SIZE_MB:
         st.error(
-            f"⚠️ **File Size Limit Exceeded ({file_size_mb:.1f} MB / Max {MAX_FILE_SIZE_MB} MB)**\n\n"
-            f"Render's Free Tier has a strict **512 MB RAM limit**. Uploading files larger than **30 MB** causes the server to run out of memory and crash.\n\n"
-            f"💡 **Solutions:**\n"
-            f"- Please compress your audio/video or split it into smaller parts under **30 MB**.\n"
-            f"- Use an MP3 converter/compressor tool (e.g. 64 kbps mono MP3 format drastically reduces file size)."
+            f"⚠️ **Direct File Size Limit Exceeded ({file_size_mb:.1f} MB / Max {MAX_FILE_SIZE_MB} MB)**\n\n"
+            f"Render's Free Tier has a strict **512 MB RAM limit**. Direct uploads larger than **30 MB** cause the server to run out of memory and crash.\n\n"
+            f"💡 **Solution:** Please switch to the **'⚡ In-Browser Fast Compressor'** tab above! It will compress your file on your device to **< 10 MB** in seconds with 0% server load."
         )
         st.stop()
+
+if active_file_bytes is not None:
 
     if "transcribing" not in st.session_state:
         st.session_state.transcribing = False
@@ -258,7 +296,7 @@ if uploaded_file is not None:
         </div>
         """, unsafe_allow_html=True)
 
-        suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
+        suffix = os.path.splitext(active_file_name)[1] or ".mp3"
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             original_path = os.path.join(tmp_dir, "input" + suffix)
@@ -293,13 +331,14 @@ if uploaded_file is not None:
                         log_box.code("\n".join(logs[-40:]), language="text")
 
                 # ── Step 1: Save uploaded file ────────────────────────────────
-                status_box.info("💾 Step 1/3: Saving uploaded file to local memory...")
-                log(f"Saving '{uploaded_file.name}' ({file_size_mb:.1f} MB)...")
+                status_box.info("💾 Step 1/3: Saving file to local memory...")
+                log(f"Saving '{active_file_name}' ({file_size_mb:.1f} MB)...")
                 flush_logs()
                 with open(original_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
+                    f.write(active_file_bytes)
                 log(f"Saved file successfully.")
                 flush_logs()
+
 
                 # ── Step 2: Chunk media file into segments ────────────────────
                 status_box.info(f"⚡ Step 2/3: Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
@@ -479,7 +518,7 @@ if uploaded_file is not None:
                     st.download_button(
                         label="📥 Download Complete Transcript (.txt)",
                         data=final_text,
-                        file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
+                        file_name=f"{os.path.splitext(active_file_name)[0]}_transcript.txt",
                         mime="text/plain"
                     )
                 else:
