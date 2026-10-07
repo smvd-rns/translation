@@ -289,29 +289,16 @@ if not raw_groq_keys:
 # Parse list of Groq keys for multi-key round-robin load balancing
 groq_keys = [k.strip() for k in raw_groq_keys.split(",") if k.strip()]
 
-# RapidAPI Key Input (Optional - for YouTube Caption Fetching)
-rapidapi_input = st.sidebar.text_input(
-    "RapidAPI Key(s) (Comma-separated for multi-account pool)",
-    value=raw_rapidapi_keys,
-    type="password",
-    placeholder="key1, key2, key3",
-    help="Free key(s) from rapidapi.com for YouTube caption fetch. Paste multiple keys to multiply your free quota!"
-)
-if rapidapi_input:
-    st.session_state.rapidapi_keys = [k.strip() for k in rapidapi_input.split(",") if k.strip()]
-else:
+# Read RapidAPI Key from backend environment variables (hidden from public UI)
+if raw_rapidapi_keys:
     st.session_state.rapidapi_keys = [k.strip() for k in raw_rapidapi_keys.split(",") if k.strip()]
+else:
+    st.session_state.rapidapi_keys = []
 
-# Optional Cloudflare Worker Proxy URL
-cf_worker_input = st.sidebar.text_input(
-    "Cloudflare YouTube Proxy URL (Optional)",
-    value=os.environ.get("CF_WORKER_TRANSCRIPT_URL", ""),
-    type="password",
-    placeholder="https://yt-transcript-proxy.your-name.workers.dev",
-    help="100% Free Cloudflare Worker URL to bypass YouTube IP blocks on Render."
-)
-if cf_worker_input:
-    st.session_state.cf_worker_url = cf_worker_input.strip()
+# Read Cloudflare Proxy URL from backend environment variables (hidden from public UI)
+cf_worker_env = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
+if cf_worker_env:
+    st.session_state.cf_worker_url = cf_worker_env
 
 if not api_key and not groq_keys:
     st.info(
