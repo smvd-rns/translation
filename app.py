@@ -74,60 +74,115 @@ def extract_youtube_video_id(url):
 
 
 def fetch_youtube_captions(video_id, target_lang=None):
-    """Fetches existing captions/subtitles directly from YouTube API if available."""
+    """Fetches existing captions/subtitles directly from YouTube if available.
+    Works with youtube-transcript-api v0.4–v0.6+. No YouTube API key needed.
+    Returns plain text transcript or None if unavailable/blocked.
+    """
     if not YOUTUBE_TRANSCRIPT_AVAILABLE or not video_id:
         return None
 
-    # Method 1: Standard YouTubeTranscriptApi static methods
-    try:
-        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
-            langs = [target_lang, 'en', 'hi', 'es'] if target_lang else ['en', 'hi', 'es']
-            try:
-                data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
-                return "\n\n".join([item['text'] for item in data if item.get('text')])
-            except Exception:
-                data = YouTubeTranscriptApi.get_transcript(video_id)
-                return "\n\n".join([item['text'] for item in data if item.get('text')])
-    except Exception:
-        pass
+    def _items_to_text(data):
+        """Convert transcript items (dict or object) to plain text."""
+        lines = []
+        for item in data:
+            if isinstance(item, dict):
+                text = item.get('text', '')
+            else:
+                # New API: FetchedTranscriptSnippet object
+                text = getattr(item, 'text', str(item))
+            if text and text.strip():
+                lines.append(text.strip())
+        return "\n\n".join(lines) if lines else None
 
-    # Method 2: list_transcripts static method
-    try:
-        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
+    # Build language priority list
+    langs_to_try = []
+    if target_lang:
+        langs_to_try.append(target_lang)
+    langs_to_try += ['en', 'hi', 'es', 'fr', 'de', 'ar', 'pt', 'ru', 'ja', 'ko', 'zh']
+
+    # ── Method 1: get_transcript (simplest, v0.4+) ──────────────────────────
+    if hasattr(YouTubeTranscriptApi, 'get_transcript'):
+        # Try preferred languages first
+        try:
+            data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
+            result = _items_to_text(data)
+            if result:
+                return result
+        except Exception:
+            pass
+        # Try any available language (no language filter)
+        try:
+            data = YouTubeTranscriptApi.get_transcript(video_id)
+            result = _items_to_text(data)
+            if result:
+                return result
+        except Exception:
+            pass
+
+    # ── Method 2: list_transcripts (v0.4+) ──────────────────────────────────
+    if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
+        try:
             t_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            if target_lang:
+            # Try manually created (non-auto-generated) first
+            for t in t_list:
+                if not getattr(t, 'is_generated', True):
+                    try:
+                        data = t.fetch()
+                        result = _items_to_text(data)
+                        if result:
+                            return result
+                    except Exception:
+                        pass
+            # Fall back to auto-generated
+            for t in t_list:
                 try:
-                    t = t_list.find_transcript([target_lang])
                     data = t.fetch()
-                    return "\n\n".join([item['text'] for item in data if item.get('text')])
+                    result = _items_to_text(data)
+                    if result:
+                        return result
                 except Exception:
                     pass
-            try:
-                t = t_list.find_transcript(['en'])
-                data = t.fetch()
-                return "\n\n".join([item['text'] for item in data if item.get('text')])
-            except Exception:
-                for t in t_list:
-                    data = t.fetch()
-                    return "\n\n".join([item['text'] for item in data if item.get('text')])
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # Method 3: Instance API fallback
+    # ── Method 3: New instance-based API (v0.6+) ────────────────────────────
     try:
         api = YouTubeTranscriptApi()
+        # v0.6+: api.fetch(video_id) returns FetchedTranscript
         if hasattr(api, 'fetch'):
-            data = api.fetch(video_id)
-            return "\n\n".join([item['text'] for item in data if item.get('text')])
-        elif hasattr(api, 'list'):
-            t_list = api.list(video_id)
-            for t in t_list:
-                data = t.fetch()
-                return "\n\n".join([item['text'] for item in data if item.get('text')])
+            try:
+                transcript = api.fetch(video_id, languages=langs_to_try)
+                result = _items_to_text(transcript)
+                if result:
+                    return result
+            except Exception:
+                pass
+            try:
+                transcript = api.fetch(video_id)
+                result = _items_to_text(transcript)
+                if result:
+                    return result
+            except Exception:
+                pass
+        # v0.6+: api.list(video_id) returns TranscriptList
+        if hasattr(api, 'list'):
+            try:
+                t_list = api.list(video_id)
+                for t in t_list:
+                    try:
+                        data = t.fetch()
+                        result = _items_to_text(data)
+                        if result:
+                            return result
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     except Exception:
         pass
 
     return None
+
 
 
 def download_youtube_audio(url, output_dir):
