@@ -77,59 +77,115 @@ def fetch_youtube_captions(video_id, target_lang=None):
     """Fetches existing captions/subtitles directly from YouTube API if available."""
     if not YOUTUBE_TRANSCRIPT_AVAILABLE or not video_id:
         return None
+
+    # Method 1: Standard YouTubeTranscriptApi static methods
     try:
-        api = YouTubeTranscriptApi()
-        if hasattr(api, 'list'):
-            transcript_list = api.list(video_id)
+        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
+            langs = [target_lang, 'en', 'hi', 'es'] if target_lang else ['en', 'hi', 'es']
+            try:
+                data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs)
+                return "\n\n".join([item['text'] for item in data if item.get('text')])
+            except Exception:
+                data = YouTubeTranscriptApi.get_transcript(video_id)
+                return "\n\n".join([item['text'] for item in data if item.get('text')])
+    except Exception:
+        pass
+
+    # Method 2: list_transcripts static method
+    try:
+        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
+            t_list = YouTubeTranscriptApi.list_transcripts(video_id)
             if target_lang:
                 try:
-                    t = transcript_list.find_transcript([target_lang])
+                    t = t_list.find_transcript([target_lang])
                     data = t.fetch()
                     return "\n\n".join([item['text'] for item in data if item.get('text')])
                 except Exception:
                     pass
             try:
-                t = transcript_list.find_transcript(['en'])
+                t = t_list.find_transcript(['en'])
                 data = t.fetch()
                 return "\n\n".join([item['text'] for item in data if item.get('text')])
             except Exception:
-                for t in transcript_list:
+                for t in t_list:
                     data = t.fetch()
                     return "\n\n".join([item['text'] for item in data if item.get('text')])
-        elif hasattr(api, 'fetch'):
-            data = api.fetch(video_id)
-            return "\n\n".join([item['text'] for item in data if item.get('text')])
     except Exception:
         pass
+
+    # Method 3: Instance API fallback
+    try:
+        api = YouTubeTranscriptApi()
+        if hasattr(api, 'fetch'):
+            data = api.fetch(video_id)
+            return "\n\n".join([item['text'] for item in data if item.get('text')])
+        elif hasattr(api, 'list'):
+            t_list = api.list(video_id)
+            for t in t_list:
+                data = t.fetch()
+                return "\n\n".join([item['text'] for item in data if item.get('text')])
+    except Exception:
+        pass
+
     return None
 
 
 def download_youtube_audio(url, output_dir):
-    """Downloads audio from YouTube link to an MP3 file using yt-dlp."""
+    """Downloads audio from YouTube link using yt-dlp with player_client fallback for cloud servers."""
     output_template = os.path.join(output_dir, "yt_audio.%(ext)s")
-    ydl_opts = {
-        'format': 'bestaudio/best',
-        'outtmpl': output_template,
-        'nocheckcertificate': True,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }],
-        'quiet': True,
-        'no_warnings': True,
-    }
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        ydl.download([url])
 
-    mp3_path = os.path.join(output_dir, "yt_audio.mp3")
-    if os.path.exists(mp3_path):
-        return mp3_path
+    # Rotate player_client options (android, ios, mweb, tv, web_embedded) to bypass cloud bot detection
+    client_configs = [
+        ['android', 'ios'],
+        ['mweb', 'tv'],
+        ['web_embedded'],
+        ['android'],
+        ['ios'],
+        ['web']
+    ]
 
-    files = glob.glob(os.path.join(output_dir, "yt_audio.*"))
-    if files:
-        return files[0]
+    last_err = None
+    for clients in client_configs:
+        try:
+            ydl_opts = {
+                'format': 'bestaudio/best',
+                'outtmpl': output_template,
+                'nocheckcertificate': True,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': clients
+                    }
+                },
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                },
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'quiet': True,
+                'no_warnings': True,
+            }
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                ydl.download([url])
+
+            mp3_path = os.path.join(output_dir, "yt_audio.mp3")
+            if os.path.exists(mp3_path):
+                return mp3_path
+
+            files = glob.glob(os.path.join(output_dir, "yt_audio.*"))
+            if files:
+                return files[0]
+        except Exception as e:
+            last_err = e
+            continue
+
+    if last_err:
+        raise last_err
     raise Exception("Could not download audio from YouTube URL.")
+
 
 
 # Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
