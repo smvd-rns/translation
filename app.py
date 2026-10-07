@@ -54,7 +54,6 @@ import requests
 import re
 import streamlit.components.v1 as components
 
-import yt_dlp
 try:
     from youtube_transcript_api import YouTubeTranscriptApi
     YOUTUBE_TRANSCRIPT_AVAILABLE = True
