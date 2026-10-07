@@ -60,6 +60,42 @@ try:
 except ImportError:
     YOUTUBE_TRANSCRIPT_AVAILABLE = False
 
+try:
+    import yt_dlp
+    YT_DLP_AVAILABLE = True
+except ImportError:
+    YT_DLP_AVAILABLE = False
+
+# Free caption providers have no app-level daily/monthly quotas.
+# RapidAPI is an optional last-resort backup and inherits RapidAPI plan quotas.
+PIPED_INSTANCE_FALLBACKS = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi-libre.kavin.rocks",
+    "https://piped-api.privacy.com.de",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.yt",
+    "https://pipedapi.drgns.space",
+    "https://pipedapi.ducks.party",
+    "https://piped-api.codespace.cz",
+    "https://pipedapi.reallyaweso.me",
+    "https://api.piped.private.coffee",
+    "https://pipedapi.nosebs.ru",
+    "https://pipedapi.leptons.xyz",
+]
+INVIDIOUS_INSTANCE_FALLBACKS = [
+    "https://inv.nadeko.net",
+    "https://invidious.f5.si",
+    "https://invidious.private.coffee",
+    "https://yt.artemislena.eu",
+    "https://invidious.jing.rocks",
+    "https://inv.tux.pizza",
+]
+PIPED_INSTANCES_DOC_URL = (
+    "https://raw.githubusercontent.com/TeamPiped/documentation/"
+    "main/content/docs/public-instances/index.md"
+)
+INVIDIOUS_INSTANCES_URL = "https://api.invidious.io/instances.json"
+
 
 def extract_youtube_video_id(url):
     """Extracts 11-character YouTube video ID from various link formats."""
@@ -72,9 +108,184 @@ def extract_youtube_video_id(url):
     return None
 
 
+def _dedupe_caption_lines(lines):
+    clean_lines = []
+    last_line = ""
+    for line in lines:
+        if line and line != last_line:
+            clean_lines.append(line)
+            last_line = line
+    return clean_lines
+
+
+def _parse_vtt_to_text(vtt_text):
+    """Convert WEBVTT / SRT-like caption text into plain paragraphs."""
+    lines = []
+    for line in (vtt_text or "").splitlines():
+        line = line.strip()
+        if (
+            not line
+            or line.startswith("WEBVTT")
+            or line.startswith("NOTE")
+            or "-->" in line
+            or line.startswith("Kind:")
+            or line.startswith("Language:")
+            or re.match(r"^\d+$", line)
+        ):
+            continue
+        line = re.sub(r"<[^>]+>", "", line).strip()
+        if line and not re.match(r"^[\d:.,]+$", line):
+            lines.append(line)
+    clean = _dedupe_caption_lines(lines)
+    return "\n\n".join(clean) if clean else None
+
+
+def _transcript_items_to_text(data):
+    lines = []
+    # New API: FetchedTranscript is iterable of snippets with .text
+    iterable = getattr(data, "snippets", None) or data
+    try:
+        iterable = list(iterable)
+    except TypeError:
+        return None
+    for item in iterable:
+        if isinstance(item, dict):
+            text = item.get("text", "")
+        else:
+            text = getattr(item, "text", str(item))
+        if text and str(text).strip():
+            lines.append(str(text).strip())
+    return "\n\n".join(lines) if lines else None
+
+
+def _load_youtube_cookie_session():
+    """Build a requests Session with Netscape cookies.txt when present."""
+    cookie_file = "cookies.txt"
+    if not os.path.exists(cookie_file):
+        return None, False
+    try:
+        from http.cookiejar import MozillaCookieJar
+        from requests import Session
+        from requests.cookies import RequestsCookieJar
+
+        jar = MozillaCookieJar(cookie_file)
+        jar.load(ignore_discard=True, ignore_expires=True)
+        session = Session()
+        req_jar = RequestsCookieJar()
+        for cookie in jar:
+            req_jar.set_cookie(cookie)
+        session.cookies = req_jar
+        session.headers.update({
+            "Accept-Language": "en-US,en;q=0.9",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            ),
+        })
+        return session, True
+    except Exception:
+        return None, True
+
+
+def _preferred_langs(target_lang=None):
+    langs = []
+    if target_lang:
+        langs.append(target_lang)
+    langs += ["en", "hi", "es", "fr", "de", "ar", "pt", "ru", "ja", "ko", "zh"]
+    # Preserve order, drop duplicates
+    seen = set()
+    ordered = []
+    for lang in langs:
+        if lang and lang not in seen:
+            seen.add(lang)
+            ordered.append(lang)
+    return ordered
+
+
+def _is_piped_api_root(url):
+    """True for Piped API base URLs; false for badge/asset paths scraped from docs."""
+    if not url or not url.startswith("https://"):
+        return False
+    lower = url.lower().rstrip("/")
+    if any(bad in lower for bad in ("/badge", "/registered", "/assets", ".png", ".svg")):
+        return False
+    host_path = lower.split("://", 1)[-1]
+    # API roots are host-only (optional trailing slash already stripped)
+    if "/" in host_path:
+        return False
+    return (
+        ("pipedapi" in host_path)
+        or ("piped-api" in host_path)
+        or host_path.startswith("api.piped.")
+    )
+
+
+def _rewrite_timedtext_url(base_url):
+    """
+    Rewrite YouTube timedtext URLs to video.google.com/timedtext.
+    Useful when www.youtube.com TLS is blocked but Google endpoints still work.
+    """
+    from urllib.parse import urlparse, urlunparse, parse_qs, urlencode
+
+    if not base_url:
+        return None
+    parsed = urlparse(base_url)
+    qs = parse_qs(parsed.query)
+    # Force VTT for consistent parsing
+    qs["fmt"] = ["vtt"]
+    flat = {k: v[0] for k, v in qs.items() if v}
+    return urlunparse(("https", "video.google.com", "/timedtext", "", urlencode(flat), ""))
+
+
+def _get_dynamic_piped_instances():
+    """Refresh Piped API URLs from the official public-instances doc when possible."""
+    instances = list(PIPED_INSTANCE_FALLBACKS)
+    try:
+        resp = requests.get(PIPED_INSTANCES_DOC_URL, timeout=8)
+        if resp.status_code == 200:
+            found = re.findall(r"https://[a-zA-Z0-9._/-]*piped[a-zA-Z0-9._/-]*", resp.text)
+            api_like = [u.rstrip("/") for u in found if _is_piped_api_root(u)]
+            if api_like:
+                # Prefer curated fallbacks first (more reliable than scraped order)
+                instances = list(dict.fromkeys(instances + api_like))
+    except Exception:
+        pass
+    return instances
+
+
+def _get_dynamic_invidious_instances():
+    """Refresh Invidious instances from api.invidious.io when possible."""
+    # Prefer curated fallbacks first — public directory is often sparse/flaky
+    instances = list(INVIDIOUS_INSTANCE_FALLBACKS)
+    try:
+        resp = requests.get(INVIDIOUS_INSTANCES_URL, timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            live = []
+            for entry in data:
+                if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                    continue
+                meta = entry[1] if isinstance(entry[1], dict) else {}
+                uri = meta.get("uri") or entry[0]
+                if (
+                    isinstance(uri, str)
+                    and uri.startswith("https://")
+                    and meta.get("type") == "https"
+                    and meta.get("api", True)
+                ):
+                    live.append(uri.rstrip("/"))
+            if live:
+                instances = list(dict.fromkeys(instances + live))
+    except Exception:
+        pass
+    return instances
+
+
 def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
     """
     Fetches YouTube transcript via RapidAPI using multi-key rotation / fallback.
+    Subject to RapidAPI plan quotas (not app-enforced).
     """
     if not keys:
         return None
@@ -137,67 +348,55 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
 
 
 def fetch_piped_transcript(video_id, target_lang=None, log_func=None):
-    """Fetches transcripts from public Piped API instances (VTT parsing)."""
-    instances = [
-        "https://pipedapi.kavin.rocks",
-        "https://pipedapi.syncpundit.io",
-        "https://pipedapi.smartheroes.fr"
-    ]
-    
+    """Fetches transcripts from public Piped API instances (VTT parsing). Free / no app quotas."""
+    instances = _get_dynamic_piped_instances()
+    # Cap attempts so a long dead list does not stall the UI
+    instances = instances[:12]
+
     for idx, instance in enumerate(instances):
         try:
             if log_func: log_func(f"🌐 Trying Piped API Instance #{idx+1} ({instance})...")
-            url = f"{instance}/streams/{video_id}"
-            resp = requests.get(url, timeout=10)
+            url = f"{instance.rstrip('/')}/streams/{video_id}"
+            resp = requests.get(url, timeout=8)
             if resp.status_code == 200:
                 data = resp.json()
-                subtitles = data.get("subtitles", [])
-                
+                subtitles = data.get("subtitles", []) or []
+
                 if not subtitles:
                     if log_func: log_func(f"⚠️ Instance #{idx+1} returned no subtitles.")
                     continue
-                
+
                 selected_sub = None
                 for sub in subtitles:
-                    if target_lang and sub.get("code", "").startswith(target_lang) and not sub.get("autoGenerated"):
-                        selected_sub = sub; break
-                    elif not target_lang and sub.get("code", "").startswith("en") and not sub.get("autoGenerated"):
-                        selected_sub = sub; break
-                        
+                    code = (sub.get("code") or "").lower()
+                    if target_lang and code.startswith(target_lang.lower()) and not sub.get("autoGenerated"):
+                        selected_sub = sub
+                        break
+                    if not target_lang and code.startswith("en") and not sub.get("autoGenerated"):
+                        selected_sub = sub
+                        break
+
                 if not selected_sub:
                     for sub in subtitles:
-                        if target_lang and sub.get("code", "").startswith(target_lang):
-                            selected_sub = sub; break
-                        elif not target_lang and sub.get("code", "").startswith("en"):
-                            selected_sub = sub; break
-                            
-                if not selected_sub and subtitles:
+                        code = (sub.get("code") or "").lower()
+                        if target_lang and code.startswith(target_lang.lower()):
+                            selected_sub = sub
+                            break
+                        if not target_lang and code.startswith("en"):
+                            selected_sub = sub
+                            break
+
+                if not selected_sub:
                     selected_sub = subtitles[0]
-                    
-                if selected_sub:
-                    sub_url = selected_sub.get("url")
-                    if sub_url:
-                        sub_resp = requests.get(sub_url, timeout=10)
-                        if sub_resp.status_code == 200:
-                            vtt_text = sub_resp.text
-                            lines = []
-                            for line in vtt_text.splitlines():
-                                line = line.strip()
-                                if not line or line.startswith("WEBVTT") or "-->" in line or line.startswith("Kind:") or line.startswith("Language:"):
-                                    continue
-                                line = re.sub(r'<[^>]+>', '', line)
-                                if line and not re.match(r'^[\d:.,]+$', line):
-                                    lines.append(line)
-                            
-                            if lines:
-                                if log_func: log_func(f"✅ Success via Piped API ({selected_sub.get('name')})!")
-                                clean_lines = []
-                                last_line = ""
-                                for l in lines:
-                                    if l != last_line:
-                                        clean_lines.append(l)
-                                        last_line = l
-                                return "\n\n".join(clean_lines)
+
+                sub_url = selected_sub.get("url")
+                if sub_url:
+                    sub_resp = requests.get(sub_url, timeout=8)
+                    if sub_resp.status_code == 200:
+                        text = _parse_vtt_to_text(sub_resp.text)
+                        if text:
+                            if log_func: log_func(f"✅ Success via Piped API ({selected_sub.get('name')})!")
+                            return text
             else:
                 if log_func: log_func(f"⚠️ Instance #{idx+1} failed with status {resp.status_code}")
         except Exception as e:
@@ -206,64 +405,326 @@ def fetch_piped_transcript(video_id, target_lang=None, log_func=None):
     return None
 
 
+def fetch_invidious_transcript(video_id, target_lang=None, log_func=None):
+    """Fetches captions via public Invidious instances. Free / no app quotas."""
+    instances = _get_dynamic_invidious_instances()[:10]
+    preferred = _preferred_langs(target_lang)
+
+    for idx, instance in enumerate(instances):
+        base = instance.rstrip("/")
+        try:
+            if log_func: log_func(f"🆓 Trying Invidious Instance #{idx+1} ({base})...")
+            list_resp = requests.get(f"{base}/api/v1/captions/{video_id}", timeout=8)
+            if list_resp.status_code != 200:
+                if log_func: log_func(f"⚠️ Invidious #{idx+1} list failed: {list_resp.status_code}")
+                continue
+            try:
+                payload = list_resp.json()
+            except Exception:
+                if log_func: log_func(f"⚠️ Invidious #{idx+1} returned non-JSON.")
+                continue
+
+            captions = payload.get("captions") if isinstance(payload, dict) else None
+            if not captions:
+                if log_func: log_func(f"⚠️ Invidious #{idx+1} has no captions for this video.")
+                continue
+
+            selected = None
+            for lang in preferred:
+                for cap in captions:
+                    code = (cap.get("languageCode") or "").lower()
+                    if code == lang.lower() or code.startswith(lang.lower() + "-"):
+                        selected = cap
+                        break
+                if selected:
+                    break
+            if not selected:
+                selected = captions[0]
+
+            lang_code = (selected.get("languageCode") or preferred[0] or "en").split("-")[0]
+            # Try label URL from API, then lang= shortcut (some instances only fill one)
+            candidate_urls = []
+            cap_url = selected.get("url") or ""
+            if cap_url.startswith("/"):
+                cap_url = base + cap_url
+            if cap_url:
+                candidate_urls.append(cap_url)
+            candidate_urls.append(f"{base}/api/v1/captions/{video_id}?lang={lang_code}")
+
+            got_body = False
+            for try_url in candidate_urls:
+                cap_resp = requests.get(try_url, timeout=10)
+                if cap_resp.status_code != 200:
+                    continue
+                if not (cap_resp.text or "").strip():
+                    continue
+                got_body = True
+                text = _parse_vtt_to_text(cap_resp.text)
+                if text:
+                    label = selected.get("label") or selected.get("languageCode") or "captions"
+                    if log_func: log_func(f"✅ Success via Invidious ({label})!")
+                    return text
+
+            if log_func:
+                if got_body:
+                    log_func(f"⚠️ Invidious #{idx+1} returned caption body but parse failed.")
+                else:
+                    log_func(f"⚠️ Invidious #{idx+1} caption body empty (instance likely can't reach YouTube).")
+        except Exception as e:
+            if log_func: log_func(f"⚠️ Invidious #{idx+1} error: {e}")
+            continue
+    return None
+
+
+def fetch_innertube_transcript(video_id, target_lang=None, log_func=None):
+    """
+    Free caption fetch via YouTube InnerTube (youtubei.googleapis.com) +
+    video.google.com/timedtext. Avoids www.youtube.com (often TLS-blocked).
+    No app-level quotas.
+    """
+    preferred = _preferred_langs(target_lang)
+    if log_func:
+        log_func("🆓 Trying InnerTube + video.google.com timedtext (free, no quota)...")
+
+    try:
+        body = {
+            "context": {
+                "client": {
+                    "clientName": "ANDROID",
+                    "clientVersion": "20.10.38",
+                }
+            },
+            "videoId": video_id,
+        }
+        resp = requests.post(
+            "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false",
+            json=body,
+            timeout=15,
+            headers={
+                "Content-Type": "application/json",
+                "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
+            },
+        )
+        if resp.status_code != 200:
+            if log_func:
+                log_func(f"⚠️ InnerTube player failed: {resp.status_code}")
+            return None
+
+        data = resp.json()
+        tracks = (
+            ((data.get("captions") or {}).get("playerCaptionsTracklistRenderer") or {})
+            .get("captionTracks")
+        )
+        if not tracks:
+            if log_func:
+                log_func("⚠️ InnerTube returned no caption tracks.")
+            return None
+
+        selected = None
+        for lang in preferred:
+            for track in tracks:
+                code = (track.get("languageCode") or "").lower()
+                if code == lang.lower() or code.startswith(lang.lower() + "-"):
+                    selected = track
+                    break
+            if selected:
+                break
+        if not selected:
+            selected = tracks[0]
+
+        timedtext_url = _rewrite_timedtext_url(selected.get("baseUrl"))
+        if not timedtext_url:
+            if log_func:
+                log_func("⚠️ InnerTube track missing baseUrl.")
+            return None
+
+        cap_resp = requests.get(timedtext_url, timeout=15)
+        if cap_resp.status_code != 200 or not (cap_resp.text or "").strip():
+            if log_func:
+                log_func(f"⚠️ timedtext download failed: {cap_resp.status_code}")
+            return None
+
+        text = _parse_vtt_to_text(cap_resp.text)
+        if text:
+            name_obj = selected.get("name")
+            if isinstance(name_obj, dict):
+                label = name_obj.get("simpleText") or selected.get("languageCode") or "captions"
+            else:
+                label = name_obj or selected.get("languageCode") or "captions"
+            if log_func:
+                log_func(f"✅ Success via InnerTube timedtext ({label})!")
+            return text
+
+        if log_func:
+            log_func("⚠️ InnerTube timedtext parse returned empty.")
+    except Exception as e:
+        if log_func:
+            log_func(f"⚠️ InnerTube error: {e}")
+    return None
+
+
+def fetch_ytdlp_transcript(video_id, target_lang=None, log_func=None):
+    """Fetch official/auto subtitles with yt-dlp (no audio download). Free / no app quotas."""
+    if not YT_DLP_AVAILABLE:
+        return None
+
+    preferred = _preferred_langs(target_lang)
+    outdir = tempfile.mkdtemp(prefix="yt_subs_")
+    cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
+    try:
+        if log_func: log_func("🆓 Trying yt-dlp subtitle extract (free, no quota)...")
+        opts = {
+            "skip_download": True,
+            "writesubtitles": True,
+            "writeautomaticsub": True,
+            "subtitleslangs": preferred[:6],
+            "subtitlesformat": "vtt",
+            "outtmpl": os.path.join(outdir, "%(id)s.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+        }
+        if cookie_file:
+            opts["cookiefile"] = cookie_file
+
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        # Prefer requested language files, then any .vtt
+        candidates = []
+        for lang in preferred:
+            candidates.extend(glob.glob(os.path.join(outdir, f"{video_id}.{lang}*.vtt")))
+        candidates.extend(glob.glob(os.path.join(outdir, f"{video_id}*.vtt")))
+        seen = set()
+        for path in candidates:
+            if path in seen:
+                continue
+            seen.add(path)
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                    text = _parse_vtt_to_text(fh.read())
+                if text:
+                    if log_func: log_func(f"✅ Success via yt-dlp ({os.path.basename(path)})!")
+                    return text
+            except Exception:
+                continue
+        if log_func: log_func("⚠️ yt-dlp found no usable subtitle files.")
+    except Exception as e:
+        if log_func: log_func(f"⚠️ yt-dlp error: {e}")
+    finally:
+        try:
+            for path in glob.glob(os.path.join(outdir, "*")):
+                try:
+                    os.remove(path)
+                except Exception:
+                    pass
+            os.rmdir(outdir)
+        except Exception:
+            pass
+    return None
+
+
+def fetch_direct_youtube_transcript(video_id, target_lang=None, log_func=None):
+    """Uses youtube-transcript-api (v1.x instance API). Free / no app quotas."""
+    if not YOUTUBE_TRANSCRIPT_AVAILABLE:
+        return None
+
+    langs_to_try = _preferred_langs(target_lang)
+    session, cookies_present = _load_youtube_cookie_session()
+    if cookies_present and session and log_func:
+        log_func("🍪 'cookies.txt' found — attaching to youtube-transcript-api session...")
+    elif cookies_present and log_func:
+        log_func("🍪 'cookies.txt' found but could not be loaded; continuing without cookies...")
+    elif log_func:
+        log_func("🌐 Trying direct youtube-transcript-api without cookies...")
+
+    try:
+        api = YouTubeTranscriptApi(http_client=session) if session else YouTubeTranscriptApi()
+    except TypeError:
+        # Extremely old fallback — should not hit with requirements pin
+        api = YouTubeTranscriptApi()
+
+    # Modern API (1.x): instance .fetch / .list
+    last_err = None
+    if hasattr(api, "fetch"):
+        try:
+            data = api.fetch(video_id, languages=langs_to_try)
+            result = _transcript_items_to_text(data)
+            if result:
+                if log_func: log_func("✅ Success via direct youtube-transcript-api!")
+                return result
+        except Exception as e:
+            last_err = e
+        try:
+            # Any available transcript language
+            if hasattr(api, "list"):
+                t_list = api.list(video_id)
+                for transcript in t_list:
+                    try:
+                        data = transcript.fetch()
+                        result = _transcript_items_to_text(data)
+                        if result:
+                            if log_func: log_func("✅ Success via youtube-transcript-api list()!")
+                            return result
+                    except Exception as e:
+                        last_err = e
+                        continue
+        except Exception as e:
+            last_err = e
+
+    # Legacy classmethods (pre-1.0) if somehow still present
+    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+        try:
+            data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
+            result = _transcript_items_to_text(data)
+            if result:
+                if log_func: log_func("✅ Success via legacy get_transcript!")
+                return result
+        except Exception as e:
+            last_err = e
+
+    if log_func:
+        if last_err:
+            log_func(f"❌ Direct youtube-transcript-api failed: {type(last_err).__name__}: {last_err}")
+        else:
+            log_func("❌ Direct youtube-transcript-api failed or blocked.")
+    return None
+
+
 def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
-    """Fetches existing captions/subtitles directly from YouTube if available."""
+    """
+    Fetch existing captions/subtitles for a YouTube video.
+
+    Priority (free / unlimited first, RapidAPI last):
+      1. youtube-transcript-api (direct)
+      2. InnerTube + video.google.com timedtext
+      3. Invidious public instances
+      4. Piped public instances
+      5. yt-dlp subtitle extract
+      6. RapidAPI (quota-limited backup)
+      7. Optional Cloudflare Worker proxy
+    """
     if not video_id:
         return None
 
-    # ── Method 1: Direct YouTube API (with cookies.txt support) ─────────────
-    if YOUTUBE_TRANSCRIPT_AVAILABLE:
-        def _items_to_text(data):
-            lines = []
-            for item in data:
-                text = item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', str(item))
-                if text and text.strip():
-                    lines.append(text.strip())
-            return "\n\n".join(lines) if lines else None
+    # ── Method 1: Direct YouTube (free, no app quotas) ───────────────────────
+    res = fetch_direct_youtube_transcript(video_id, target_lang=target_lang, log_func=log_func)
+    if res:
+        return res
 
-        langs_to_try = [target_lang] if target_lang else []
-        langs_to_try += ['en', 'hi', 'es', 'fr', 'de', 'ar', 'pt', 'ru', 'ja', 'ko', 'zh']
+    # ── Method 2: InnerTube / video.google.com (bypasses youtube.com TLS) ────
+    res = fetch_innertube_transcript(video_id, target_lang=target_lang, log_func=log_func)
+    if res:
+        return res
 
-        cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
-        if cookie_file and log_func: log_func("🍪 'cookies.txt' found! Using cookies to bypass YouTube BotGuard...")
-        elif log_func: log_func("🌐 Trying direct youtube-transcript-api without cookies...")
+    # ── Method 3: Invidious (free public mirrors) ────────────────────────────
+    if log_func: log_func("🆓 Trying Free Invidious Instances...")
+    res = fetch_invidious_transcript(video_id, target_lang=target_lang, log_func=log_func)
+    if res:
+        return res
+    elif log_func:
+        log_func("❌ Invidious instances failed or returned no captions.")
 
-        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
-            try:
-                data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try, cookies=cookie_file)
-                result = _items_to_text(data)
-                if result:
-                    if log_func: log_func("✅ Success via direct youtube-transcript-api (with languages)!")
-                    return result
-            except Exception:
-                pass
-            try:
-                data = YouTubeTranscriptApi.get_transcript(video_id, cookies=cookie_file)
-                result = _items_to_text(data)
-                if result:
-                    if log_func: log_func("✅ Success via direct youtube-transcript-api!")
-                    return result
-            except Exception:
-                pass
-
-        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
-            try:
-                t_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_file)
-                for t in t_list:
-                    try:
-                        data = t.fetch()
-                        result = _items_to_text(data)
-                        if result:
-                            if log_func: log_func("✅ Success via list_transcripts!")
-                            return result
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-        
-        if log_func: log_func("❌ Direct youtube-transcript-api failed or blocked.")
-
-    # ── Method 2: Piped API Public Instances (100% Free & Unlimited) ─────────
+    # ── Method 4: Piped (free public mirrors, dynamically refreshed) ─────────
     if log_func: log_func("🌐 Trying Free Piped API Instances...")
     res = fetch_piped_transcript(video_id, target_lang=target_lang, log_func=log_func)
     if res:
@@ -271,7 +732,12 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
     elif log_func:
         log_func("❌ Piped API instances failed or returned no captions.")
 
-    # ── Method 3: RapidAPI Multi-Key Pool (Limited Quota Backup) ────────────
+    # ── Method 5: yt-dlp (free local extract) ────────────────────────────────
+    res = fetch_ytdlp_transcript(video_id, target_lang=target_lang, log_func=log_func)
+    if res:
+        return res
+
+    # ── Method 6: RapidAPI (external plan quotas — last resort) ──────────────
     rapidapi_keys = []
     raw_r_env = os.environ.get("RAPIDAPI_KEY", "").strip()
     if raw_r_env:
@@ -280,14 +746,14 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
         rapidapi_keys = st.session_state.rapidapi_keys
 
     if rapidapi_keys:
-        if log_func: log_func(f"🔑 Falling back to RapidAPI (Pool of {len(rapidapi_keys)} keys)...")
+        if log_func: log_func(f"🔑 Falling back to RapidAPI (Pool of {len(rapidapi_keys)} keys, quota-limited)...")
         res = fetch_rapidapi_transcript(video_id, rapidapi_keys, target_lang=target_lang, log_func=log_func)
         if res:
             return res
         elif log_func:
             log_func("❌ All RapidAPI keys failed.")
 
-    # ── Method 4: Cloudflare Worker Proxy (Bypasses IP Blocks) ───────────────
+    # ── Method 7: Cloudflare Worker Proxy (Bypasses IP Blocks) ───────────────
     cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
     if not cf_worker_url and hasattr(st, "session_state") and "cf_worker_url" in st.session_state:
         cf_worker_url = st.session_state.cf_worker_url.strip()
@@ -306,7 +772,7 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
                         if log_func: log_func("✅ Success via Cloudflare Worker!")
                         return "\n\n".join(lines)
             else:
-                 if log_func: log_func(f"⚠️ Cloudflare Worker failed: {resp.status_code}")
+                if log_func: log_func(f"⚠️ Cloudflare Worker failed: {resp.status_code}")
         except Exception as cf_err:
             if log_func: log_func(f"⚠️ Cloudflare error: {cf_err}")
 

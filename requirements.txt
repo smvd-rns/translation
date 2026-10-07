@@ -1,4 +1,6 @@
 streamlit
 google-genai
 google-generativeai
+requests
 youtube-transcript-api>=1.2.4
+yt-dlp
