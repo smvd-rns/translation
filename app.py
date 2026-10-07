@@ -72,19 +72,19 @@ def extract_youtube_video_id(url):
     return None
 
 
-def fetch_rapidapi_transcript(video_id, keys, target_lang=None):
+def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
     """
     Fetches YouTube transcript via RapidAPI using multi-key rotation / fallback.
-    If key 1 hits rate limits or quota, it automatically fails over to key 2, key 3, etc.
     """
     if not keys:
         return None
 
-    for key in keys:
+    for idx, key in enumerate(keys):
         key = key.strip()
         if not key:
             continue
         try:
+            if log_func: log_func(f"Trying RapidAPI Key #{idx+1}...")
             # Endpoint 1: youtube-transcriptor
             url = f"https://youtube-transcriptor.p.rapidapi.com/transcript?video_id={video_id}"
             headers = {
@@ -109,7 +109,10 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None):
                     elif "text" in data:
                         lines = [data["text"].strip()]
                 if lines:
+                    if log_func: log_func(f"✅ Success with Key #{idx+1} (youtube-transcriptor)")
                     return "\n\n".join([l for l in lines if l])
+            else:
+                if log_func: log_func(f"⚠️ Key #{idx+1} (youtube-transcriptor) returned {resp.status_code}: {resp.text[:100]}")
 
             # Endpoint 2: youtube-transcript3
             url2 = f"https://youtube-transcript3.p.rapidapi.com/api/transcript-with-timestamps?video_id={video_id}"
@@ -123,13 +126,17 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None):
                 if isinstance(data2, dict) and "transcript" in data2:
                     lines = [t.get("text", "").strip() for t in data2["transcript"] if isinstance(t, dict) and t.get("text")]
                     if lines:
+                        if log_func: log_func(f"✅ Success with Key #{idx+1} (youtube-transcript3)")
                         return "\n\n".join(lines)
-        except Exception:
+            else:
+                if log_func: log_func(f"⚠️ Key #{idx+1} (youtube-transcript3) returned {resp2.status_code}: {resp2.text[:100]}")
+        except Exception as e:
+            if log_func: log_func(f"⚠️ Key #{idx+1} error: {e}")
             continue
     return None
 
 
-def fetch_youtube_captions(video_id, target_lang=None):
+def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
     """Fetches existing captions/subtitles directly from YouTube if available.
     1. RapidAPI Multi-Key Pool (if configured)
     2. Cloudflare Worker Proxy (if configured)
@@ -147,9 +154,12 @@ def fetch_youtube_captions(video_id, target_lang=None):
         rapidapi_keys = st.session_state.rapidapi_keys
 
     if rapidapi_keys:
-        res = fetch_rapidapi_transcript(video_id, rapidapi_keys, target_lang=target_lang)
+        if log_func: log_func(f"🔑 Using RapidAPI (Pool of {len(rapidapi_keys)} keys)...")
+        res = fetch_rapidapi_transcript(video_id, rapidapi_keys, target_lang=target_lang, log_func=log_func)
         if res:
             return res
+        elif log_func:
+            log_func("❌ All RapidAPI keys failed.")
 
     # ── Method 2: Cloudflare Worker Proxy (Bypasses IP Blocks) ───────────────
     cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
@@ -157,6 +167,7 @@ def fetch_youtube_captions(video_id, target_lang=None):
         cf_worker_url = st.session_state.cf_worker_url.strip()
 
     if cf_worker_url:
+        if log_func: log_func("🌐 Trying Cloudflare Proxy Worker...")
         try:
             if not cf_worker_url.startswith("http://") and not cf_worker_url.startswith("https://"):
                 cf_worker_url = "https://" + cf_worker_url
@@ -168,8 +179,12 @@ def fetch_youtube_captions(video_id, target_lang=None):
                 if "transcript" in json_data and isinstance(json_data["transcript"], list):
                     lines = [item.get("text", "").strip() for item in json_data["transcript"] if item.get("text")]
                     if lines:
+                        if log_func: log_func("✅ Success via Cloudflare Worker!")
                         return "\n\n".join(lines)
-        except Exception:
+            else:
+                 if log_func: log_func(f"⚠️ Cloudflare Worker failed: {resp.status_code}")
+        except Exception as cf_err:
+            if log_func: log_func(f"⚠️ Cloudflare error: {cf_err}")
             pass
 
     if not YOUTUBE_TRANSCRIPT_AVAILABLE:
@@ -571,7 +586,7 @@ if can_proceed:
                     flush_logs()
 
                     try:
-                        yt_captions = fetch_youtube_captions(yt_video_id, target_lang=selected_language_code)
+                        yt_captions = fetch_youtube_captions(yt_video_id, target_lang=selected_language_code, log_func=log)
                     except Exception as cap_err:
                         yt_captions = None
                         log(f"⚠️ Caption fetch error: {type(cap_err).__name__}: {cap_err}")
