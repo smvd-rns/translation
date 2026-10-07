@@ -98,16 +98,16 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
                 if isinstance(data, list):
                     for item in data:
                         if isinstance(item, dict) and "text" in item:
-                            lines.append(item["text"].strip())
+                            lines.append(str(item["text"]).strip())
                         elif isinstance(item, dict) and "transcription" in item:
-                            lines.extend([t.get("text", "").strip() for t in item["transcription"] if isinstance(t, dict) and t.get("text")])
+                            lines.extend([str(t.get("text", "")).strip() for t in item["transcription"] if isinstance(t, dict) and t.get("text") is not None])
                         elif isinstance(item, list):
-                            lines.extend([t.get("text", "").strip() for t in item if isinstance(t, dict) and t.get("text")])
+                            lines.extend([str(t.get("text", "")).strip() for t in item if isinstance(t, dict) and t.get("text") is not None])
                 elif isinstance(data, dict):
                     if "transcript" in data and isinstance(data["transcript"], list):
-                        lines = [t.get("text", "").strip() for t in data["transcript"] if isinstance(t, dict) and t.get("text")]
+                        lines = [str(t.get("text", "")).strip() for t in data["transcript"] if isinstance(t, dict) and t.get("text") is not None]
                     elif "text" in data:
-                        lines = [data["text"].strip()]
+                        lines = [str(data["text"]).strip()]
                 if lines:
                     if log_func: log_func(f"✅ Success with Key #{idx+1} (youtube-transcriptor)")
                     return "\n\n".join([l for l in lines if l])
@@ -124,7 +124,7 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
             if resp2.status_code == 200:
                 data2 = resp2.json()
                 if isinstance(data2, dict) and "transcript" in data2:
-                    lines = [t.get("text", "").strip() for t in data2["transcript"] if isinstance(t, dict) and t.get("text")]
+                    lines = [str(t.get("text", "")).strip() for t in data2["transcript"] if isinstance(t, dict) and t.get("text") is not None]
                     if lines:
                         if log_func: log_func(f"✅ Success with Key #{idx+1} (youtube-transcript3)")
                         return "\n\n".join(lines)
@@ -207,23 +207,71 @@ def fetch_piped_transcript(video_id, target_lang=None, log_func=None):
 
 
 def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
-    """Fetches existing captions/subtitles directly from YouTube if available.
-    1. RapidAPI Multi-Key Pool (if configured)
-    2. Cloudflare Worker Proxy (if configured)
-    3. Direct youtube-transcript-api library
-    """
+    """Fetches existing captions/subtitles directly from YouTube if available."""
     if not video_id:
         return None
 
-    # ── Method 1: Piped API Public Instances (100% Free & Unlimited) ─────────
-    if log_func: log_func("🌐 Trying Free Piped API Instances first...")
+    # ── Method 1: Direct YouTube API (with cookies.txt support) ─────────────
+    if YOUTUBE_TRANSCRIPT_AVAILABLE:
+        def _items_to_text(data):
+            lines = []
+            for item in data:
+                text = item.get('text', '') if isinstance(item, dict) else getattr(item, 'text', str(item))
+                if text and text.strip():
+                    lines.append(text.strip())
+            return "\n\n".join(lines) if lines else None
+
+        langs_to_try = [target_lang] if target_lang else []
+        langs_to_try += ['en', 'hi', 'es', 'fr', 'de', 'ar', 'pt', 'ru', 'ja', 'ko', 'zh']
+
+        cookie_file = "cookies.txt" if os.path.exists("cookies.txt") else None
+        if cookie_file and log_func: log_func("🍪 'cookies.txt' found! Using cookies to bypass YouTube BotGuard...")
+        elif log_func: log_func("🌐 Trying direct youtube-transcript-api without cookies...")
+
+        if hasattr(YouTubeTranscriptApi, 'get_transcript'):
+            try:
+                data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try, cookies=cookie_file)
+                result = _items_to_text(data)
+                if result:
+                    if log_func: log_func("✅ Success via direct youtube-transcript-api (with languages)!")
+                    return result
+            except Exception:
+                pass
+            try:
+                data = YouTubeTranscriptApi.get_transcript(video_id, cookies=cookie_file)
+                result = _items_to_text(data)
+                if result:
+                    if log_func: log_func("✅ Success via direct youtube-transcript-api!")
+                    return result
+            except Exception:
+                pass
+
+        if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
+            try:
+                t_list = YouTubeTranscriptApi.list_transcripts(video_id, cookies=cookie_file)
+                for t in t_list:
+                    try:
+                        data = t.fetch()
+                        result = _items_to_text(data)
+                        if result:
+                            if log_func: log_func("✅ Success via list_transcripts!")
+                            return result
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        
+        if log_func: log_func("❌ Direct youtube-transcript-api failed or blocked.")
+
+    # ── Method 2: Piped API Public Instances (100% Free & Unlimited) ─────────
+    if log_func: log_func("🌐 Trying Free Piped API Instances...")
     res = fetch_piped_transcript(video_id, target_lang=target_lang, log_func=log_func)
     if res:
         return res
     elif log_func:
         log_func("❌ Piped API instances failed or returned no captions.")
 
-    # ── Method 2: RapidAPI Multi-Key Pool (Limited Quota Backup) ────────────
+    # ── Method 3: RapidAPI Multi-Key Pool (Limited Quota Backup) ────────────
     rapidapi_keys = []
     raw_r_env = os.environ.get("RAPIDAPI_KEY", "").strip()
     if raw_r_env:
@@ -239,7 +287,7 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
         elif log_func:
             log_func("❌ All RapidAPI keys failed.")
 
-    # ── Method 2: Cloudflare Worker Proxy (Bypasses IP Blocks) ───────────────
+    # ── Method 4: Cloudflare Worker Proxy (Bypasses IP Blocks) ───────────────
     cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
     if not cf_worker_url and hasattr(st, "session_state") and "cf_worker_url" in st.session_state:
         cf_worker_url = st.session_state.cf_worker_url.strip()
@@ -247,10 +295,8 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
     if cf_worker_url:
         if log_func: log_func("🌐 Trying Cloudflare Proxy Worker...")
         try:
-            if not cf_worker_url.startswith("http://") and not cf_worker_url.startswith("https://"):
-                cf_worker_url = "https://" + cf_worker_url
+            cf_worker_url = ("https://" + cf_worker_url) if not cf_worker_url.startswith("http") else cf_worker_url
             cf_worker_url = cf_worker_url.rstrip("/")
-            
             resp = requests.get(f"{cf_worker_url}/?v={video_id}", timeout=12)
             if resp.status_code == 200:
                 json_data = resp.json()
@@ -263,59 +309,6 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
                  if log_func: log_func(f"⚠️ Cloudflare Worker failed: {resp.status_code}")
         except Exception as cf_err:
             if log_func: log_func(f"⚠️ Cloudflare error: {cf_err}")
-            pass
-
-    if not YOUTUBE_TRANSCRIPT_AVAILABLE:
-        return None
-
-    def _items_to_text(data):
-        """Convert transcript items (dict or object) to plain text."""
-        lines = []
-        for item in data:
-            if isinstance(item, dict):
-                text = item.get('text', '')
-            else:
-                text = getattr(item, 'text', str(item))
-            if text and text.strip():
-                lines.append(text.strip())
-        return "\n\n".join(lines) if lines else None
-
-    # Build language priority list
-    langs_to_try = []
-    if target_lang:
-        langs_to_try.append(target_lang)
-    langs_to_try += ['en', 'hi', 'es', 'fr', 'de', 'ar', 'pt', 'ru', 'ja', 'ko', 'zh']
-
-    # ── Method 3: Direct YouTube API (youtube-transcript-api) Fallback ───────
-    if hasattr(YouTubeTranscriptApi, 'get_transcript'):
-        try:
-            data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
-            result = _items_to_text(data)
-            if result:
-                return result
-        except Exception:
-            pass
-        try:
-            data = YouTubeTranscriptApi.get_transcript(video_id)
-            result = _items_to_text(data)
-            if result:
-                return result
-        except Exception:
-            pass
-
-    if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
-        try:
-            t_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            for t in t_list:
-                try:
-                    data = t.fetch()
-                    result = _items_to_text(data)
-                    if result:
-                        return result
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     return None
 
