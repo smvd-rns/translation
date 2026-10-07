@@ -115,7 +115,7 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
                 if log_func: log_func(f"⚠️ Key #{idx+1} (youtube-transcriptor) returned {resp.status_code}: {resp.text[:100]}")
 
             # Endpoint 2: youtube-transcript3
-            url2 = f"https://youtube-transcript3.p.rapidapi.com/api/transcript-with-timestamps?video_id={video_id}"
+            url2 = f"https://youtube-transcript3.p.rapidapi.com/api/transcript?videoId={video_id}"
             headers2 = {
                 "x-rapidapi-key": key,
                 "x-rapidapi-host": "youtube-transcript3.p.rapidapi.com"
