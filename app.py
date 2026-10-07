@@ -252,6 +252,7 @@ groq_keys = [k.strip() for k in raw_groq_keys.split(",") if k.strip()]
 cf_worker_input = st.sidebar.text_input(
     "Cloudflare YouTube Proxy URL (Optional)",
     value=os.environ.get("CF_WORKER_TRANSCRIPT_URL", ""),
+    type="password",
     placeholder="https://yt-transcript-proxy.your-name.workers.dev",
     help="100% Free Cloudflare Worker URL to bypass YouTube IP blocks on Render."
 )
