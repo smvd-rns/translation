@@ -147,7 +147,6 @@ def fetch_youtube_captions(video_id, target_lang=None):
     # ── Method 3: New instance-based API (v0.6+) ────────────────────────────
     try:
         api = YouTubeTranscriptApi()
-        # v0.6+: api.fetch(video_id) returns FetchedTranscript
         if hasattr(api, 'fetch'):
             try:
                 transcript = api.fetch(video_id, languages=langs_to_try)
@@ -163,7 +162,6 @@ def fetch_youtube_captions(video_id, target_lang=None):
                     return result
             except Exception:
                 pass
-        # v0.6+: api.list(video_id) returns TranscriptList
         if hasattr(api, 'list'):
             try:
                 t_list = api.list(video_id)
@@ -179,6 +177,27 @@ def fetch_youtube_captions(video_id, target_lang=None):
                 pass
     except Exception:
         pass
+
+    # ── Method 4: Cloudflare Worker Proxy Fallback (Bypasses IP Blocks) ───────
+    cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
+    if not cf_worker_url and hasattr(st, "session_state") and "cf_worker_url" in st.session_state:
+        cf_worker_url = st.session_state.cf_worker_url.strip()
+
+    if cf_worker_url:
+        try:
+            # Ensure URL has protocol
+            if not cf_worker_url.startswith("http://") and not cf_worker_url.startswith("https://"):
+                cf_worker_url = "https://" + cf_worker_url
+            
+            resp = requests.get(f"{cf_worker_url}?v={video_id}", timeout=10)
+            if resp.status_code == 200:
+                json_data = resp.json()
+                if "transcript" in json_data and isinstance(json_data["transcript"], list):
+                    lines = [item.get("text", "").strip() for item in json_data["transcript"] if item.get("text")]
+                    if lines:
+                        return "\n\n".join(lines)
+        except Exception:
+            pass
 
     return None
 
@@ -228,6 +247,16 @@ if not raw_groq_keys:
 
 # Parse list of Groq keys for multi-key round-robin load balancing
 groq_keys = [k.strip() for k in raw_groq_keys.split(",") if k.strip()]
+
+# Optional Cloudflare Worker Proxy URL
+cf_worker_input = st.sidebar.text_input(
+    "Cloudflare YouTube Proxy URL (Optional)",
+    value=os.environ.get("CF_WORKER_TRANSCRIPT_URL", ""),
+    placeholder="https://yt-transcript-proxy.your-name.workers.dev",
+    help="100% Free Cloudflare Worker URL to bypass YouTube IP blocks on Render."
+)
+if cf_worker_input:
+    st.session_state.cf_worker_url = cf_worker_input.strip()
 
 if not api_key and not groq_keys:
     st.info(
