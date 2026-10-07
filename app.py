@@ -68,19 +68,22 @@ except ImportError:
 
 # Free caption providers have no app-level daily/monthly quotas.
 # RapidAPI is an optional last-resort backup and inherits RapidAPI plan quotas.
+#
+# Fail-fast policy for public mirrors: short connect timeouts + few attempts.
+# InnerTube is preferred because it does not depend on flaky public mirrors.
+MIRROR_CONNECT_TIMEOUT = 2.5
+MIRROR_READ_TIMEOUT = 3.0
+MIRROR_TIMEOUT = (MIRROR_CONNECT_TIMEOUT, MIRROR_READ_TIMEOUT)
+MIRROR_MAX_INSTANCES = 3
+MIRROR_BAD_TTL_SEC = 15 * 60  # skip recently-dead hosts
+_INSTANCE_HEALTH = {}  # host -> {"bad_until": epoch, "ok_until": epoch}
+
 PIPED_INSTANCE_FALLBACKS = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi-libre.kavin.rocks",
-    "https://piped-api.privacy.com.de",
     "https://pipedapi.adminforge.de",
-    "https://api.piped.yt",
-    "https://pipedapi.drgns.space",
-    "https://pipedapi.ducks.party",
-    "https://piped-api.codespace.cz",
     "https://pipedapi.reallyaweso.me",
     "https://api.piped.private.coffee",
     "https://pipedapi.nosebs.ru",
-    "https://pipedapi.leptons.xyz",
 ]
 INVIDIOUS_INSTANCE_FALLBACKS = [
     "https://inv.nadeko.net",
@@ -88,13 +91,68 @@ INVIDIOUS_INSTANCE_FALLBACKS = [
     "https://invidious.private.coffee",
     "https://yt.artemislena.eu",
     "https://invidious.jing.rocks",
-    "https://inv.tux.pizza",
 ]
 PIPED_INSTANCES_DOC_URL = (
     "https://raw.githubusercontent.com/TeamPiped/documentation/"
     "main/content/docs/public-instances/index.md"
 )
 INVIDIOUS_INSTANCES_URL = "https://api.invidious.io/instances.json"
+
+
+def _host_key(url):
+    try:
+        from urllib.parse import urlparse
+        return (urlparse(url).netloc or url).lower()
+    except Exception:
+        return (url or "").lower()
+
+
+def _instance_is_skipped(url):
+    meta = _INSTANCE_HEALTH.get(_host_key(url)) or {}
+    bad_until = meta.get("bad_until") or 0
+    return time.time() < bad_until
+
+
+def _mark_instance_bad(url, reason=""):
+    key = _host_key(url)
+    _INSTANCE_HEALTH[key] = {
+        "bad_until": time.time() + MIRROR_BAD_TTL_SEC,
+        "reason": str(reason)[:120],
+    }
+
+
+def _mark_instance_ok(url):
+    key = _host_key(url)
+    _INSTANCE_HEALTH[key] = {"ok_until": time.time() + MIRROR_BAD_TTL_SEC, "bad_until": 0}
+
+
+def _is_fast_fail_error(exc):
+    """DNS / connect / SSL failures should abort that host immediately."""
+    if isinstance(exc, (requests.exceptions.ConnectTimeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.SSLError):
+        return True
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    needles = ("nameresolutionerror", "getaddrinfo", "failed to resolve", "nodename", "ssl", "certificate")
+    return any(n in name or n in msg for n in needles)
+
+
+def _pick_instances(candidates, limit=MIRROR_MAX_INSTANCES):
+    """Dedupe, skip recently-bad hosts, cap attempts."""
+    picked = []
+    seen = set()
+    for raw in candidates or []:
+        url = (raw or "").rstrip("/")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        if _instance_is_skipped(url):
+            continue
+        picked.append(url)
+        if len(picked) >= limit:
+            break
+    return picked
 
 
 def extract_youtube_video_id(url):
@@ -242,7 +300,7 @@ def _get_dynamic_piped_instances():
     """Refresh Piped API URLs from the official public-instances doc when possible."""
     instances = list(PIPED_INSTANCE_FALLBACKS)
     try:
-        resp = requests.get(PIPED_INSTANCES_DOC_URL, timeout=8)
+        resp = requests.get(PIPED_INSTANCES_DOC_URL, timeout=MIRROR_TIMEOUT)
         if resp.status_code == 200:
             found = re.findall(r"https://[a-zA-Z0-9._/-]*piped[a-zA-Z0-9._/-]*", resp.text)
             api_like = [u.rstrip("/") for u in found if _is_piped_api_root(u)]
@@ -259,7 +317,7 @@ def _get_dynamic_invidious_instances():
     # Prefer curated fallbacks first — public directory is often sparse/flaky
     instances = list(INVIDIOUS_INSTANCE_FALLBACKS)
     try:
-        resp = requests.get(INVIDIOUS_INSTANCES_URL, timeout=8)
+        resp = requests.get(INVIDIOUS_INSTANCES_URL, timeout=MIRROR_TIMEOUT)
         if resp.status_code == 200:
             data = resp.json()
             live = []
@@ -349,84 +407,110 @@ def fetch_rapidapi_transcript(video_id, keys, target_lang=None, log_func=None):
 
 def fetch_piped_transcript(video_id, target_lang=None, log_func=None):
     """Fetches transcripts from public Piped API instances (VTT parsing). Free / no app quotas."""
-    instances = _get_dynamic_piped_instances()
-    # Cap attempts so a long dead list does not stall the UI
-    instances = instances[:12]
+    instances = _pick_instances(_get_dynamic_piped_instances(), MIRROR_MAX_INSTANCES)
+    if not instances:
+        if log_func:
+            log_func("⚠️ No Piped instances available (all recently marked bad).")
+        return None
+    if log_func:
+        log_func(f"🌐 Trying up to {len(instances)} Piped instance(s) (fail-fast)...")
 
     for idx, instance in enumerate(instances):
         try:
-            if log_func: log_func(f"🌐 Trying Piped API Instance #{idx+1} ({instance})...")
-            url = f"{instance.rstrip('/')}/streams/{video_id}"
-            resp = requests.get(url, timeout=8)
-            if resp.status_code == 200:
-                data = resp.json()
-                subtitles = data.get("subtitles", []) or []
+            if log_func:
+                log_func(f"🌐 Piped #{idx+1}: {instance}")
+            url = f"{instance}/streams/{video_id}"
+            resp = requests.get(url, timeout=MIRROR_TIMEOUT)
+            if resp.status_code != 200:
+                _mark_instance_bad(instance, f"HTTP {resp.status_code}")
+                if log_func:
+                    log_func(f"⚠️ Piped #{idx+1} failed: HTTP {resp.status_code}")
+                continue
 
-                if not subtitles:
-                    if log_func: log_func(f"⚠️ Instance #{idx+1} returned no subtitles.")
-                    continue
+            data = resp.json()
+            subtitles = data.get("subtitles", []) or []
+            if not subtitles:
+                if log_func:
+                    log_func(f"⚠️ Piped #{idx+1} returned no subtitles.")
+                continue
 
-                selected_sub = None
+            selected_sub = None
+            for sub in subtitles:
+                code = (sub.get("code") or "").lower()
+                if target_lang and code.startswith(target_lang.lower()) and not sub.get("autoGenerated"):
+                    selected_sub = sub
+                    break
+                if not target_lang and code.startswith("en") and not sub.get("autoGenerated"):
+                    selected_sub = sub
+                    break
+
+            if not selected_sub:
                 for sub in subtitles:
                     code = (sub.get("code") or "").lower()
-                    if target_lang and code.startswith(target_lang.lower()) and not sub.get("autoGenerated"):
+                    if target_lang and code.startswith(target_lang.lower()):
                         selected_sub = sub
                         break
-                    if not target_lang and code.startswith("en") and not sub.get("autoGenerated"):
+                    if not target_lang and code.startswith("en"):
                         selected_sub = sub
                         break
 
-                if not selected_sub:
-                    for sub in subtitles:
-                        code = (sub.get("code") or "").lower()
-                        if target_lang and code.startswith(target_lang.lower()):
-                            selected_sub = sub
-                            break
-                        if not target_lang and code.startswith("en"):
-                            selected_sub = sub
-                            break
+            if not selected_sub:
+                selected_sub = subtitles[0]
 
-                if not selected_sub:
-                    selected_sub = subtitles[0]
-
-                sub_url = selected_sub.get("url")
-                if sub_url:
-                    sub_resp = requests.get(sub_url, timeout=8)
-                    if sub_resp.status_code == 200:
-                        text = _parse_vtt_to_text(sub_resp.text)
-                        if text:
-                            if log_func: log_func(f"✅ Success via Piped API ({selected_sub.get('name')})!")
-                            return text
-            else:
-                if log_func: log_func(f"⚠️ Instance #{idx+1} failed with status {resp.status_code}")
+            sub_url = selected_sub.get("url")
+            if not sub_url:
+                continue
+            sub_resp = requests.get(sub_url, timeout=MIRROR_TIMEOUT)
+            if sub_resp.status_code != 200:
+                continue
+            text = _parse_vtt_to_text(sub_resp.text)
+            if text:
+                _mark_instance_ok(instance)
+                if log_func:
+                    log_func(f"✅ Success via Piped API ({selected_sub.get('name')})!")
+                return text
         except Exception as e:
-            if log_func: log_func(f"⚠️ Instance #{idx+1} error: {e}")
+            _mark_instance_bad(instance, e)
+            if log_func:
+                kind = "DNS/connect" if _is_fast_fail_error(e) else "error"
+                log_func(f"⚠️ Piped #{idx+1} {kind}: {e}")
             continue
     return None
 
 
 def fetch_invidious_transcript(video_id, target_lang=None, log_func=None):
     """Fetches captions via public Invidious instances. Free / no app quotas."""
-    instances = _get_dynamic_invidious_instances()[:10]
+    instances = _pick_instances(_get_dynamic_invidious_instances(), MIRROR_MAX_INSTANCES)
     preferred = _preferred_langs(target_lang)
+    if not instances:
+        if log_func:
+            log_func("⚠️ No Invidious instances available (all recently marked bad).")
+        return None
+    if log_func:
+        log_func(f"🆓 Trying up to {len(instances)} Invidious instance(s) (fail-fast)...")
 
     for idx, instance in enumerate(instances):
         base = instance.rstrip("/")
         try:
-            if log_func: log_func(f"🆓 Trying Invidious Instance #{idx+1} ({base})...")
-            list_resp = requests.get(f"{base}/api/v1/captions/{video_id}", timeout=8)
+            if log_func:
+                log_func(f"🆓 Invidious #{idx+1}: {base}")
+            list_resp = requests.get(f"{base}/api/v1/captions/{video_id}", timeout=MIRROR_TIMEOUT)
             if list_resp.status_code != 200:
-                if log_func: log_func(f"⚠️ Invidious #{idx+1} list failed: {list_resp.status_code}")
+                _mark_instance_bad(base, f"HTTP {list_resp.status_code}")
+                if log_func:
+                    log_func(f"⚠️ Invidious #{idx+1} list failed: {list_resp.status_code}")
                 continue
             try:
                 payload = list_resp.json()
             except Exception:
-                if log_func: log_func(f"⚠️ Invidious #{idx+1} returned non-JSON.")
+                if log_func:
+                    log_func(f"⚠️ Invidious #{idx+1} returned non-JSON.")
                 continue
 
             captions = payload.get("captions") if isinstance(payload, dict) else None
             if not captions:
-                if log_func: log_func(f"⚠️ Invidious #{idx+1} has no captions for this video.")
+                if log_func:
+                    log_func(f"⚠️ Invidious #{idx+1} has no captions for this video.")
                 continue
 
             selected = None
@@ -442,7 +526,6 @@ def fetch_invidious_transcript(video_id, target_lang=None, log_func=None):
                 selected = captions[0]
 
             lang_code = (selected.get("languageCode") or preferred[0] or "en").split("-")[0]
-            # Try label URL from API, then lang= shortcut (some instances only fill one)
             candidate_urls = []
             cap_url = selected.get("url") or ""
             if cap_url.startswith("/"):
@@ -453,7 +536,7 @@ def fetch_invidious_transcript(video_id, target_lang=None, log_func=None):
 
             got_body = False
             for try_url in candidate_urls:
-                cap_resp = requests.get(try_url, timeout=10)
+                cap_resp = requests.get(try_url, timeout=MIRROR_TIMEOUT)
                 if cap_resp.status_code != 200:
                     continue
                 if not (cap_resp.text or "").strip():
@@ -461,8 +544,10 @@ def fetch_invidious_transcript(video_id, target_lang=None, log_func=None):
                 got_body = True
                 text = _parse_vtt_to_text(cap_resp.text)
                 if text:
+                    _mark_instance_ok(base)
                     label = selected.get("label") or selected.get("languageCode") or "captions"
-                    if log_func: log_func(f"✅ Success via Invidious ({label})!")
+                    if log_func:
+                        log_func(f"✅ Success via Invidious ({label})!")
                     return text
 
             if log_func:
@@ -471,7 +556,10 @@ def fetch_invidious_transcript(video_id, target_lang=None, log_func=None):
                 else:
                     log_func(f"⚠️ Invidious #{idx+1} caption body empty (instance likely can't reach YouTube).")
         except Exception as e:
-            if log_func: log_func(f"⚠️ Invidious #{idx+1} error: {e}")
+            _mark_instance_bad(base, e)
+            if log_func:
+                kind = "DNS/connect" if _is_fast_fail_error(e) else "error"
+                log_func(f"⚠️ Invidious #{idx+1} {kind}: {e}")
             continue
     return None
 
@@ -480,11 +568,11 @@ def fetch_innertube_transcript(video_id, target_lang=None, log_func=None):
     """
     Free caption fetch via YouTube InnerTube (youtubei.googleapis.com) +
     video.google.com/timedtext. Avoids www.youtube.com (often TLS-blocked).
-    No app-level quotas.
+    No app-level quotas. Preferred free path — try this first.
     """
     preferred = _preferred_langs(target_lang)
     if log_func:
-        log_func("🆓 Trying InnerTube + video.google.com timedtext (free, no quota)...")
+        log_func("🆓 [1/primary] InnerTube + video.google.com/timedtext...")
 
     try:
         body = {
@@ -499,7 +587,7 @@ def fetch_innertube_transcript(video_id, target_lang=None, log_func=None):
         resp = requests.post(
             "https://youtubei.googleapis.com/youtubei/v1/player?prettyPrint=false",
             json=body,
-            timeout=15,
+            timeout=(MIRROR_CONNECT_TIMEOUT, 8),
             headers={
                 "Content-Type": "application/json",
                 "User-Agent": "com.google.android.youtube/20.10.38 (Linux; U; Android 14)",
@@ -538,7 +626,9 @@ def fetch_innertube_transcript(video_id, target_lang=None, log_func=None):
                 log_func("⚠️ InnerTube track missing baseUrl.")
             return None
 
-        cap_resp = requests.get(timedtext_url, timeout=15)
+        if log_func:
+            log_func("⬇️ Downloading timedtext from video.google.com...")
+        cap_resp = requests.get(timedtext_url, timeout=(MIRROR_CONNECT_TIMEOUT, 8))
         if cap_resp.status_code != 200 or not (cap_resp.text or "").strip():
             if log_func:
                 log_func(f"⚠️ timedtext download failed: {cap_resp.status_code}")
@@ -582,12 +672,26 @@ def fetch_ytdlp_transcript(video_id, target_lang=None, log_func=None):
             "outtmpl": os.path.join(outdir, "%(id)s.%(ext)s"),
             "quiet": True,
             "no_warnings": True,
+            "socket_timeout": 8,
+            "retries": 0,
+            "fragment_retries": 0,
         }
         if cookie_file:
             opts["cookiefile"] = cookie_file
 
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
+        def _ydl_run():
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([f"https://www.youtube.com/watch?v={video_id}"])
+
+        try:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(_ydl_run).result(timeout=20)
+        except FuturesTimeout:
+            if log_func:
+                log_func("⚠️ yt-dlp timed out after 20s — skipping.")
+            return None
 
         # Prefer requested language files, then any .vtt
         candidates = []
@@ -623,10 +727,14 @@ def fetch_ytdlp_transcript(video_id, target_lang=None, log_func=None):
     return None
 
 
-def fetch_direct_youtube_transcript(video_id, target_lang=None, log_func=None):
-    """Uses youtube-transcript-api (v1.x instance API). Free / no app quotas."""
+def fetch_direct_youtube_transcript(video_id, target_lang=None, log_func=None, overall_timeout=8):
+    """Uses youtube-transcript-api (v1.x instance API). Free / no app quotas.
+    Hard-capped so a blocked www.youtube.com TLS path cannot stall the cascade.
+    """
     if not YOUTUBE_TRANSCRIPT_AVAILABLE:
         return None
+
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 
     langs_to_try = _preferred_langs(target_lang)
     session, cookies_present = _load_youtube_cookie_session()
@@ -635,53 +743,65 @@ def fetch_direct_youtube_transcript(video_id, target_lang=None, log_func=None):
     elif cookies_present and log_func:
         log_func("🍪 'cookies.txt' found but could not be loaded; continuing without cookies...")
     elif log_func:
-        log_func("🌐 Trying direct youtube-transcript-api without cookies...")
+        log_func("🌐 Trying direct youtube-transcript-api (max {}s)...".format(overall_timeout))
+
+    def _run():
+        try:
+            api = YouTubeTranscriptApi(http_client=session) if session else YouTubeTranscriptApi()
+        except TypeError:
+            api = YouTubeTranscriptApi()
+
+        last_err = None
+        if hasattr(api, "fetch"):
+            try:
+                data = api.fetch(video_id, languages=langs_to_try)
+                result = _transcript_items_to_text(data)
+                if result:
+                    return result, None
+            except Exception as e:
+                last_err = e
+            try:
+                if hasattr(api, "list"):
+                    t_list = api.list(video_id)
+                    for transcript in t_list:
+                        try:
+                            data = transcript.fetch()
+                            result = _transcript_items_to_text(data)
+                            if result:
+                                return result, None
+                        except Exception as e:
+                            last_err = e
+                            continue
+            except Exception as e:
+                last_err = e
+
+        if hasattr(YouTubeTranscriptApi, "get_transcript"):
+            try:
+                data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
+                result = _transcript_items_to_text(data)
+                if result:
+                    return result, None
+            except Exception as e:
+                last_err = e
+        return None, last_err
 
     try:
-        api = YouTubeTranscriptApi(http_client=session) if session else YouTubeTranscriptApi()
-    except TypeError:
-        # Extremely old fallback — should not hit with requirements pin
-        api = YouTubeTranscriptApi()
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            fut = pool.submit(_run)
+            result, last_err = fut.result(timeout=overall_timeout)
+    except FuturesTimeout:
+        if log_func:
+            log_func(f"⚠️ Direct youtube-transcript-api timed out after {overall_timeout}s — skipping.")
+        return None
+    except Exception as e:
+        if log_func:
+            log_func(f"❌ Direct youtube-transcript-api failed: {type(e).__name__}: {e}")
+        return None
 
-    # Modern API (1.x): instance .fetch / .list
-    last_err = None
-    if hasattr(api, "fetch"):
-        try:
-            data = api.fetch(video_id, languages=langs_to_try)
-            result = _transcript_items_to_text(data)
-            if result:
-                if log_func: log_func("✅ Success via direct youtube-transcript-api!")
-                return result
-        except Exception as e:
-            last_err = e
-        try:
-            # Any available transcript language
-            if hasattr(api, "list"):
-                t_list = api.list(video_id)
-                for transcript in t_list:
-                    try:
-                        data = transcript.fetch()
-                        result = _transcript_items_to_text(data)
-                        if result:
-                            if log_func: log_func("✅ Success via youtube-transcript-api list()!")
-                            return result
-                    except Exception as e:
-                        last_err = e
-                        continue
-        except Exception as e:
-            last_err = e
-
-    # Legacy classmethods (pre-1.0) if somehow still present
-    if hasattr(YouTubeTranscriptApi, "get_transcript"):
-        try:
-            data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
-            result = _transcript_items_to_text(data)
-            if result:
-                if log_func: log_func("✅ Success via legacy get_transcript!")
-                return result
-        except Exception as e:
-            last_err = e
-
+    if result:
+        if log_func:
+            log_func("✅ Success via direct youtube-transcript-api!")
+        return result
     if log_func:
         if last_err:
             log_func(f"❌ Direct youtube-transcript-api failed: {type(last_err).__name__}: {last_err}")
@@ -695,10 +815,10 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
     Fetch existing captions/subtitles for a YouTube video.
 
     Priority (free / unlimited first, RapidAPI last):
-      1. youtube-transcript-api (direct)
-      2. InnerTube + video.google.com timedtext
-      3. Invidious public instances
-      4. Piped public instances
+      1. InnerTube + video.google.com timedtext  ← preferred free path
+      2. youtube-transcript-api (direct, hard-capped)
+      3. Invidious public instances (≤3, fail-fast)
+      4. Piped public instances (≤3, fail-fast)
       5. yt-dlp subtitle extract
       6. RapidAPI (quota-limited backup)
       7. Optional Cloudflare Worker proxy
@@ -706,31 +826,32 @@ def fetch_youtube_captions(video_id, target_lang=None, log_func=None):
     if not video_id:
         return None
 
-    # ── Method 1: Direct YouTube (free, no app quotas) ───────────────────────
-    res = fetch_direct_youtube_transcript(video_id, target_lang=target_lang, log_func=log_func)
-    if res:
-        return res
+    if log_func:
+        log_func(f"📡 Caption cascade starting for video '{video_id}' (InnerTube first)...")
 
-    # ── Method 2: InnerTube / video.google.com (bypasses youtube.com TLS) ────
+    # ── Method 1: InnerTube / video.google.com (preferred free path) ─────────
     res = fetch_innertube_transcript(video_id, target_lang=target_lang, log_func=log_func)
     if res:
         return res
 
-    # ── Method 3: Invidious (free public mirrors) ────────────────────────────
-    if log_func: log_func("🆓 Trying Free Invidious Instances...")
+    # ── Method 2: Direct YouTube (often blocked by TLS; hard-capped) ─────────
+    res = fetch_direct_youtube_transcript(video_id, target_lang=target_lang, log_func=log_func)
+    if res:
+        return res
+
+    # ── Method 3: Invidious (few instances, fail-fast) ───────────────────────
     res = fetch_invidious_transcript(video_id, target_lang=target_lang, log_func=log_func)
     if res:
         return res
     elif log_func:
-        log_func("❌ Invidious instances failed or returned no captions.")
+        log_func("❌ Invidious fail-fast pool exhausted.")
 
-    # ── Method 4: Piped (free public mirrors, dynamically refreshed) ─────────
-    if log_func: log_func("🌐 Trying Free Piped API Instances...")
+    # ── Method 4: Piped (few instances, fail-fast) ───────────────────────────
     res = fetch_piped_transcript(video_id, target_lang=target_lang, log_func=log_func)
     if res:
         return res
     elif log_func:
-        log_func("❌ Piped API instances failed or returned no captions.")
+        log_func("❌ Piped fail-fast pool exhausted.")
 
     # ── Method 5: yt-dlp (free local extract) ────────────────────────────────
     res = fetch_ytdlp_transcript(video_id, target_lang=target_lang, log_func=log_func)
