@@ -666,7 +666,13 @@ if can_proceed:
                     log(f"Fetching official/auto captions for YouTube Video ID '{yt_video_id}'...")
                     flush_logs()
 
-                    yt_captions = fetch_youtube_captions(yt_video_id, target_lang=selected_language_code)
+                    try:
+                        yt_captions = fetch_youtube_captions(yt_video_id, target_lang=selected_language_code)
+                    except Exception as cap_err:
+                        yt_captions = None
+                        log(f"⚠️ Caption fetch error: {type(cap_err).__name__}: {cap_err}")
+                        flush_logs()
+
                     if yt_captions:
                         final_text = yt_captions
                         log(f"🎉 Successfully fetched YouTube captions instantly!")
@@ -675,6 +681,7 @@ if can_proceed:
                     else:
                         log("⚠️ No captions found via YouTube API. Falling back to Full AI Audio Download & Transcription...")
                         flush_logs()
+
 
                 # ── Full AI Audio Pipeline (Upload File OR YouTube Fallback) ───
                 if not final_text:
