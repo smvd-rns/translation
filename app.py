@@ -72,22 +72,92 @@ def extract_youtube_video_id(url):
     return None
 
 
+def fetch_rapidapi_transcript(video_id, keys, target_lang=None):
+    """
+    Fetches YouTube transcript via RapidAPI using multi-key rotation / fallback.
+    If key 1 hits rate limits or quota, it automatically fails over to key 2, key 3, etc.
+    """
+    if not keys:
+        return None
+
+    for key in keys:
+        key = key.strip()
+        if not key:
+            continue
+        try:
+            # Endpoint 1: youtube-transcriptor
+            url = f"https://youtube-transcriptor.p.rapidapi.com/transcript?video_id={video_id}"
+            headers = {
+                "x-rapidapi-key": key,
+                "x-rapidapi-host": "youtube-transcriptor.p.rapidapi.com"
+            }
+            resp = requests.get(url, headers=headers, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                lines = []
+                if isinstance(data, list):
+                    for item in data:
+                        if isinstance(item, dict) and "text" in item:
+                            lines.append(item["text"].strip())
+                        elif isinstance(item, dict) and "transcription" in item:
+                            lines.extend([t.get("text", "").strip() for t in item["transcription"] if isinstance(t, dict) and t.get("text")])
+                        elif isinstance(item, list):
+                            lines.extend([t.get("text", "").strip() for t in item if isinstance(t, dict) and t.get("text")])
+                elif isinstance(data, dict):
+                    if "transcript" in data and isinstance(data["transcript"], list):
+                        lines = [t.get("text", "").strip() for t in data["transcript"] if isinstance(t, dict) and t.get("text")]
+                    elif "text" in data:
+                        lines = [data["text"].strip()]
+                if lines:
+                    return "\n\n".join([l for l in lines if l])
+
+            # Endpoint 2: youtube-transcript3
+            url2 = f"https://youtube-transcript3.p.rapidapi.com/api/transcript-with-timestamps?video_id={video_id}"
+            headers2 = {
+                "x-rapidapi-key": key,
+                "x-rapidapi-host": "youtube-transcript3.p.rapidapi.com"
+            }
+            resp2 = requests.get(url2, headers=headers2, timeout=10)
+            if resp2.status_code == 200:
+                data2 = resp2.json()
+                if isinstance(data2, dict) and "transcript" in data2:
+                    lines = [t.get("text", "").strip() for t in data2["transcript"] if isinstance(t, dict) and t.get("text")]
+                    if lines:
+                        return "\n\n".join(lines)
+        except Exception:
+            continue
+    return None
+
+
 def fetch_youtube_captions(video_id, target_lang=None):
     """Fetches existing captions/subtitles directly from YouTube if available.
-    Uses Cloudflare Worker Proxy FIRST if configured to bypass server IP blocks.
-    Returns plain text transcript or None if unavailable/blocked.
+    1. RapidAPI Multi-Key Pool (if configured)
+    2. Cloudflare Worker Proxy (if configured)
+    3. Direct youtube-transcript-api library
     """
     if not video_id:
         return None
 
-    # ── Method 1: Cloudflare Worker Proxy (Bypasses IP Blocks FIRST) ─────────
+    # ── Method 1: RapidAPI Multi-Key Pool (Highest Reliability) ─────────────
+    rapidapi_keys = []
+    raw_r_env = os.environ.get("RAPIDAPI_KEY", "").strip()
+    if raw_r_env:
+        rapidapi_keys = [k.strip() for k in raw_r_env.split(",") if k.strip()]
+    if hasattr(st, "session_state") and "rapidapi_keys" in st.session_state and st.session_state.rapidapi_keys:
+        rapidapi_keys = st.session_state.rapidapi_keys
+
+    if rapidapi_keys:
+        res = fetch_rapidapi_transcript(video_id, rapidapi_keys, target_lang=target_lang)
+        if res:
+            return res
+
+    # ── Method 2: Cloudflare Worker Proxy (Bypasses IP Blocks) ───────────────
     cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
     if not cf_worker_url and hasattr(st, "session_state") and "cf_worker_url" in st.session_state:
         cf_worker_url = st.session_state.cf_worker_url.strip()
 
     if cf_worker_url:
         try:
-            # Ensure URL has protocol and no trailing slash
             if not cf_worker_url.startswith("http://") and not cf_worker_url.startswith("https://"):
                 cf_worker_url = "https://" + cf_worker_url
             cf_worker_url = cf_worker_url.rstrip("/")
@@ -99,7 +169,7 @@ def fetch_youtube_captions(video_id, target_lang=None):
                     lines = [item.get("text", "").strip() for item in json_data["transcript"] if item.get("text")]
                     if lines:
                         return "\n\n".join(lines)
-        except Exception as cf_err:
+        except Exception:
             pass
 
     if not YOUTUBE_TRANSCRIPT_AVAILABLE:
@@ -123,7 +193,7 @@ def fetch_youtube_captions(video_id, target_lang=None):
         langs_to_try.append(target_lang)
     langs_to_try += ['en', 'hi', 'es', 'fr', 'de', 'ar', 'pt', 'ru', 'ja', 'ko', 'zh']
 
-    # ── Method 2: Direct YouTube API (youtube-transcript-api) Fallback ───────
+    # ── Method 3: Direct YouTube API (youtube-transcript-api) Fallback ───────
     if hasattr(YouTubeTranscriptApi, 'get_transcript'):
         try:
             data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
@@ -176,6 +246,7 @@ st.write("Upload an audio/video file or paste a direct **YouTube link** to gener
 # ── API Key Configuration ─────────────────────────────────────────────────────
 api_key = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"")
 raw_groq_keys = os.environ.get("GROQ_API_KEY", "").strip().strip("'\"")
+raw_rapidapi_keys = os.environ.get("RAPIDAPI_KEY", "").strip().strip("'\"")
 
 if not api_key:
     st.sidebar.title("⚙️ Settings")
@@ -202,6 +273,19 @@ if not raw_groq_keys:
 
 # Parse list of Groq keys for multi-key round-robin load balancing
 groq_keys = [k.strip() for k in raw_groq_keys.split(",") if k.strip()]
+
+# RapidAPI Key Input (Optional - for YouTube Caption Fetching)
+rapidapi_input = st.sidebar.text_input(
+    "RapidAPI Key(s) (Comma-separated for multi-account pool)",
+    value=raw_rapidapi_keys,
+    type="password",
+    placeholder="key1, key2, key3",
+    help="Free key(s) from rapidapi.com for YouTube caption fetch. Paste multiple keys to multiply your free quota!"
+)
+if rapidapi_input:
+    st.session_state.rapidapi_keys = [k.strip() for k in rapidapi_input.split(",") if k.strip()]
+else:
+    st.session_state.rapidapi_keys = [k.strip() for k in raw_rapidapi_keys.split(",") if k.strip()]
 
 # Optional Cloudflare Worker Proxy URL
 cf_worker_input = st.sidebar.text_input(
