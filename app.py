@@ -74,10 +74,35 @@ def extract_youtube_video_id(url):
 
 def fetch_youtube_captions(video_id, target_lang=None):
     """Fetches existing captions/subtitles directly from YouTube if available.
-    Works with youtube-transcript-api v0.4–v0.6+. No YouTube API key needed.
+    Uses Cloudflare Worker Proxy FIRST if configured to bypass server IP blocks.
     Returns plain text transcript or None if unavailable/blocked.
     """
-    if not YOUTUBE_TRANSCRIPT_AVAILABLE or not video_id:
+    if not video_id:
+        return None
+
+    # ── Method 1: Cloudflare Worker Proxy (Bypasses IP Blocks FIRST) ─────────
+    cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
+    if not cf_worker_url and hasattr(st, "session_state") and "cf_worker_url" in st.session_state:
+        cf_worker_url = st.session_state.cf_worker_url.strip()
+
+    if cf_worker_url:
+        try:
+            # Ensure URL has protocol and no trailing slash
+            if not cf_worker_url.startswith("http://") and not cf_worker_url.startswith("https://"):
+                cf_worker_url = "https://" + cf_worker_url
+            cf_worker_url = cf_worker_url.rstrip("/")
+            
+            resp = requests.get(f"{cf_worker_url}/?v={video_id}", timeout=12)
+            if resp.status_code == 200:
+                json_data = resp.json()
+                if "transcript" in json_data and isinstance(json_data["transcript"], list):
+                    lines = [item.get("text", "").strip() for item in json_data["transcript"] if item.get("text")]
+                    if lines:
+                        return "\n\n".join(lines)
+        except Exception as cf_err:
+            pass
+
+    if not YOUTUBE_TRANSCRIPT_AVAILABLE:
         return None
 
     def _items_to_text(data):
@@ -87,7 +112,6 @@ def fetch_youtube_captions(video_id, target_lang=None):
             if isinstance(item, dict):
                 text = item.get('text', '')
             else:
-                # New API: FetchedTranscriptSnippet object
                 text = getattr(item, 'text', str(item))
             if text and text.strip():
                 lines.append(text.strip())
@@ -99,9 +123,8 @@ def fetch_youtube_captions(video_id, target_lang=None):
         langs_to_try.append(target_lang)
     langs_to_try += ['en', 'hi', 'es', 'fr', 'de', 'ar', 'pt', 'ru', 'ja', 'ko', 'zh']
 
-    # ── Method 1: get_transcript (simplest, v0.4+) ──────────────────────────
+    # ── Method 2: Direct YouTube API (youtube-transcript-api) Fallback ───────
     if hasattr(YouTubeTranscriptApi, 'get_transcript'):
-        # Try preferred languages first
         try:
             data = YouTubeTranscriptApi.get_transcript(video_id, languages=langs_to_try)
             result = _items_to_text(data)
@@ -109,7 +132,6 @@ def fetch_youtube_captions(video_id, target_lang=None):
                 return result
         except Exception:
             pass
-        # Try any available language (no language filter)
         try:
             data = YouTubeTranscriptApi.get_transcript(video_id)
             result = _items_to_text(data)
@@ -118,21 +140,9 @@ def fetch_youtube_captions(video_id, target_lang=None):
         except Exception:
             pass
 
-    # ── Method 2: list_transcripts (v0.4+) ──────────────────────────────────
     if hasattr(YouTubeTranscriptApi, 'list_transcripts'):
         try:
             t_list = YouTubeTranscriptApi.list_transcripts(video_id)
-            # Try manually created (non-auto-generated) first
-            for t in t_list:
-                if not getattr(t, 'is_generated', True):
-                    try:
-                        data = t.fetch()
-                        result = _items_to_text(data)
-                        if result:
-                            return result
-                    except Exception:
-                        pass
-            # Fall back to auto-generated
             for t in t_list:
                 try:
                     data = t.fetch()
@@ -141,61 +151,6 @@ def fetch_youtube_captions(video_id, target_lang=None):
                         return result
                 except Exception:
                     pass
-        except Exception:
-            pass
-
-    # ── Method 3: New instance-based API (v0.6+) ────────────────────────────
-    try:
-        api = YouTubeTranscriptApi()
-        if hasattr(api, 'fetch'):
-            try:
-                transcript = api.fetch(video_id, languages=langs_to_try)
-                result = _items_to_text(transcript)
-                if result:
-                    return result
-            except Exception:
-                pass
-            try:
-                transcript = api.fetch(video_id)
-                result = _items_to_text(transcript)
-                if result:
-                    return result
-            except Exception:
-                pass
-        if hasattr(api, 'list'):
-            try:
-                t_list = api.list(video_id)
-                for t in t_list:
-                    try:
-                        data = t.fetch()
-                        result = _items_to_text(data)
-                        if result:
-                            return result
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # ── Method 4: Cloudflare Worker Proxy Fallback (Bypasses IP Blocks) ───────
-    cf_worker_url = os.environ.get("CF_WORKER_TRANSCRIPT_URL", "").strip()
-    if not cf_worker_url and hasattr(st, "session_state") and "cf_worker_url" in st.session_state:
-        cf_worker_url = st.session_state.cf_worker_url.strip()
-
-    if cf_worker_url:
-        try:
-            # Ensure URL has protocol
-            if not cf_worker_url.startswith("http://") and not cf_worker_url.startswith("https://"):
-                cf_worker_url = "https://" + cf_worker_url
-            
-            resp = requests.get(f"{cf_worker_url}?v={video_id}", timeout=10)
-            if resp.status_code == 200:
-                json_data = resp.json()
-                if "transcript" in json_data and isinstance(json_data["transcript"], list):
-                    lines = [item.get("text", "").strip() for item in json_data["transcript"] if item.get("text")]
-                    if lines:
-                        return "\n\n".join(lines)
         except Exception:
             pass
 
