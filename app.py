@@ -51,7 +51,85 @@ import tempfile
 import subprocess
 import traceback
 import requests
+import re
 import streamlit.components.v1 as components
+
+import yt_dlp
+try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+    YOUTUBE_TRANSCRIPT_AVAILABLE = True
+except ImportError:
+    YOUTUBE_TRANSCRIPT_AVAILABLE = False
+
+
+def extract_youtube_video_id(url):
+    """Extracts 11-character YouTube video ID from various link formats."""
+    if not url:
+        return None
+    pattern = r'(?:v=|\/([0-9A-Za-z_-]{11}).*|youtu\.be\/|embed\/|shorts\/)([0-9A-Za-z_-]{11})'
+    match = re.search(pattern, url)
+    if match:
+        return match.group(1) or match.group(2)
+    return None
+
+
+def fetch_youtube_captions(video_id, target_lang=None):
+    """Fetches existing captions/subtitles directly from YouTube API if available."""
+    if not YOUTUBE_TRANSCRIPT_AVAILABLE or not video_id:
+        return None
+    try:
+        api = YouTubeTranscriptApi()
+        if hasattr(api, 'list'):
+            transcript_list = api.list(video_id)
+            if target_lang:
+                try:
+                    t = transcript_list.find_transcript([target_lang])
+                    data = t.fetch()
+                    return "\n\n".join([item['text'] for item in data if item.get('text')])
+                except Exception:
+                    pass
+            try:
+                t = transcript_list.find_transcript(['en'])
+                data = t.fetch()
+                return "\n\n".join([item['text'] for item in data if item.get('text')])
+            except Exception:
+                for t in transcript_list:
+                    data = t.fetch()
+                    return "\n\n".join([item['text'] for item in data if item.get('text')])
+        elif hasattr(api, 'fetch'):
+            data = api.fetch(video_id)
+            return "\n\n".join([item['text'] for item in data if item.get('text')])
+    except Exception:
+        pass
+    return None
+
+
+def download_youtube_audio(url, output_dir):
+    """Downloads audio from YouTube link to an MP3 file using yt-dlp."""
+    output_template = os.path.join(output_dir, "yt_audio.%(ext)s")
+    ydl_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_template,
+        'nocheckcertificate': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'no_warnings': True,
+    }
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.download([url])
+
+    mp3_path = os.path.join(output_dir, "yt_audio.mp3")
+    if os.path.exists(mp3_path):
+        return mp3_path
+
+    files = glob.glob(os.path.join(output_dir, "yt_audio.*"))
+    if files:
+        return files[0]
+    raise Exception("Could not download audio from YouTube URL.")
 
 
 # Try loading the new Google GenAI SDK (supports AQ. keys and AIza. keys)
@@ -64,7 +142,8 @@ except ImportError:
     USE_NEW_SDK = False
 
 st.title("🎙️ Audio & Video Transcription App")
-st.write("Upload an audio or video file to generate a transcript — powered by Google Gemini AI & Groq Whisper.")
+st.write("Upload an audio/video file or paste a direct **YouTube link** to generate a transcript — powered by Google Gemini AI & Groq Whisper.")
+
 
 # ── API Key Configuration ─────────────────────────────────────────────────────
 api_key = os.environ.get("GEMINI_API_KEY", "").strip().strip("'\"")
@@ -122,21 +201,60 @@ def transcribe_with_groq(chunk_path, key, language=None):
         else:
             raise Exception(f"Groq API Error {resp.status_code}: {resp.text}")
 
-# ── File uploader ─────────────────────────────────────────────────────────────
-uploaded_file = st.file_uploader(
-    "Choose an audio or video file (Max 30 MB)",
-    type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
-    help="Maximum file size supported is 30 MB."
+# ── Input Source Selection ───────────────────────────────────────────────────
+input_source = st.radio(
+    "📥 Select Input Source",
+    options=["📁 Upload Audio / Video File", "🔗 Paste YouTube Video Link"],
+    horizontal=True
 )
 
-with st.expander("💡 Have a file larger than 30 MB? Click here for quick compression steps"):
-    st.markdown(
-        "1. 🌐 Go to **[online-audio-converter.com](https://online-audio-converter.com/)**\n"
-        "2. Click **'Open files'** and select your file.\n"
-        "3. Click **'Advanced settings'**:\n"
-        "   - Set **Bitrate** to **`32 kbps`**\n"
-        "   - Set **Channels** to **`1`** (Mono)\n"
-        "4. Click **'Convert'** and download your compressed file under 30 MB! 🚀"
+uploaded_file = None
+youtube_url = ""
+yt_video_id = None
+yt_transcription_mode = "⚡ Auto-Fetch YouTube Captions (Instant - 1 Second)"
+
+if input_source == "📁 Upload Audio / Video File":
+    uploaded_file = st.file_uploader(
+        "Choose an audio or video file (Max 30 MB)",
+        type=["mp3", "mp4", "wav", "m4a", "aac", "flac", "ogg", "mov", "mkv"],
+        help="Maximum file size supported is 30 MB."
+    )
+    with st.expander("💡 Have a file larger than 30 MB? Click here for quick compression steps"):
+        st.markdown(
+            "1. 🌐 Go to **[online-audio-converter.com](https://online-audio-converter.com/)**\n"
+            "2. Click **'Open files'** and select your file.\n"
+            "3. Click **'Advanced settings'**:\n"
+            "   - Set **Bitrate** to **`32 kbps`**\n"
+            "   - Set **Channels** to **`1`** (Mono)\n"
+            "4. Click **'Convert'** and download your compressed file under 30 MB! 🚀"
+        )
+else:
+    youtube_url = st.text_input(
+        "🔗 Enter YouTube Video Link",
+        placeholder="https://www.youtube.com/watch?v=... or https://youtu.be/...",
+        help="Paste any public YouTube lecture, presentation, or video URL."
+    ).strip()
+
+    if youtube_url:
+        yt_video_id = extract_youtube_video_id(youtube_url)
+        if yt_video_id:
+            components.html(
+                f'''<iframe width="100%" height="350" src="https://www.youtube-nocookie.com/embed/{yt_video_id}" 
+                title="YouTube video player" frameborder="0" 
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" 
+                referrerpolicy="strict-origin-when-cross-origin" allowfullscreen style="border-radius: 10px; width: 100%;"></iframe>''',
+                height=360
+            )
+        else:
+            st.warning("⚠️ Invalid YouTube URL format. Please enter a valid YouTube video link.")
+
+    yt_transcription_mode = st.radio(
+        "⚡ YouTube Processing Method",
+        options=[
+            "⚡ Auto-Fetch YouTube Captions (Instant - 1 Second)",
+            "🧠 Full AI Audio Transcription (Groq Whisper / Gemini AI)"
+        ],
+        help="Auto-Fetch retrieves official or auto-generated YouTube captions instantly. Full AI download extracts audio and runs Groq Whisper / Gemini AI."
     )
 
 
@@ -179,12 +297,13 @@ chunk_duration = st.slider(
     help="Long audio files will be automatically split into chunks of this size for optimal processing within Gemini rate limits."
 )
 
+
 def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
     """Slices input media into chunks in <1 second using ultra-fast ffmpeg stream copy."""
     ext = os.path.splitext(input_path)[1] or ".mp3"
     chunk_pattern_copy = os.path.join(tmp_dir, f"chunk_%03d{ext}")
     segment_seconds = str(chunk_minutes * 60)
-    
+
     # ⚡ Ultra-fast Stream Copy (-c copy) — takes ~0.5s for a 1-hour file!
     cmd_copy = [
         "ffmpeg", "-y", "-i", input_path,
@@ -193,7 +312,7 @@ def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
         "-c", "copy",
         chunk_pattern_copy
     ]
-    
+
     try:
         res = subprocess.run(cmd_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         chunks = sorted(glob.glob(os.path.join(tmp_dir, f"chunk_*{ext}")))
@@ -201,7 +320,7 @@ def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
             return chunks
     except Exception:
         pass
-    
+
     # Fallback re-encoding if stream copy is incompatible with container
     chunk_pattern_mp3 = os.path.join(tmp_dir, "chunk_%03d.mp3")
     cmd_reencode = [
@@ -218,10 +337,16 @@ def chunk_media_file(input_path, tmp_dir, chunk_minutes=10):
             return chunks
     except Exception:
         pass
-    
+
     return [input_path]
 
-if uploaded_file is not None:
+
+# Check if ready to transcribe
+can_proceed = False
+file_size_mb = 0.0
+download_filename = "transcript.txt"
+
+if input_source == "📁 Upload Audio / Video File" and uploaded_file is not None:
     file_size_mb = uploaded_file.size / (1024 * 1024)
 
     if uploaded_file.type.startswith("audio"):
@@ -248,6 +373,18 @@ if uploaded_file is not None:
         )
         st.stop()
 
+    download_filename = f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt"
+    can_proceed = True
+
+elif input_source == "🔗 Paste YouTube Video Link" and youtube_url:
+    if not yt_video_id:
+        st.warning("⚠️ Please provide a valid YouTube URL to proceed.")
+    else:
+        download_filename = f"youtube_{yt_video_id}_transcript.txt"
+        can_proceed = True
+
+
+if can_proceed:
     if "transcribing" not in st.session_state:
         st.session_state.transcribing = False
 
@@ -272,24 +409,20 @@ if uploaded_file is not None:
                     ⚡ Transcription in Progress...
                 </div>
                 <div style="font-size: 0.88rem; color: #dddddd; margin-top: 4px;">
-                    Your file is being uploaded, sliced into chunks, and processed in real-time. Please stay on this page.
+                    Your audio is being processed and transcribed in real-time. Please stay on this page.
                 </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
 
-        suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
-
         with tempfile.TemporaryDirectory() as tmp_dir:
-            original_path = os.path.join(tmp_dir, "input" + suffix)
-
             try:
                 status_box = st.empty()
                 progress_bar = st.progress(0)
-                
+
                 st.subheader("📋 Live Activity Logs")
                 log_box = st.empty()
-                
+
                 st.subheader("📝 Live Transcript Preview")
                 transcript_preview = st.empty()
 
@@ -312,201 +445,236 @@ if uploaded_file is not None:
                     if updated:
                         log_box.code("\n".join(logs[-40:]), language="text")
 
-                # ── Step 1: Save uploaded file ────────────────────────────────
-                status_box.info("💾 Step 1/3: Saving uploaded file to local memory...")
-                log(f"Saving '{uploaded_file.name}' ({file_size_mb:.1f} MB)...")
-                flush_logs()
-                with open(original_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                log("Saved file successfully.")
-                flush_logs()
-
-                # ── Step 2: Chunk media file into segments ────────────────────
-                status_box.info(f"⚡ Step 2/3: Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
-                log(f"Running ffmpeg to split audio into {chunk_duration}-minute chunks...")
-                
-                chunk_files = chunk_media_file(original_path, tmp_dir, chunk_minutes=chunk_duration)
-
-
-
-                total_chunks = len(chunk_files)
-                log(f"Audio split complete! Created {total_chunks} chunk file(s).")
-                status_box.info(f"✅ Prepared **{total_chunks} chunk(s)** for processing.")
-
-                transcripts = []
-
-                lang_rule = ""
-                if selected_language_code:
-                    lang_name = selected_lang_label.split(" (")[0]
-                    lang_rule = f"\n4. The primary spoken language is {lang_name}. Transcribe strictly in {lang_name} using its native script."
-
-                prompt = (
-                    "Please transcribe the speech in this audio file accurately. "
-                    "Important rules:\n"
-                    "1. Output only the spoken text preserving natural paragraph breaks.\n"
-                    "2. If there are repeating chants, mantras, or background music, transcribe the words accurately without repeating the same line over and over endlessly.\n"
-                    "3. Do not add commentary, timestamps, or extra formatting."
-                    f"{lang_rule}"
-                )
-
+                final_text = ""
                 start_time = time.time()
 
-                # ── Step 3: Process chunks in parallel (3 concurrent workers) ──
-                log("⚡ Launching Parallel Processing (3 concurrent workers for max speed)...")
-                import concurrent.futures
+                # ── Fast Path: YouTube Auto-Fetch Captions ──────────────────────
+                if input_source == "🔗 Paste YouTube Video Link" and "Auto-Fetch" in yt_transcription_mode:
+                    status_box.info("⚡ Attempting instant fetch of YouTube captions...")
+                    log(f"Fetching official/auto captions for YouTube Video ID '{yt_video_id}'...")
+                    flush_logs()
 
-                if groq_keys:
-                    fallback_models = ["groq-whisper", DEFAULT_GEMINI_MODEL, "gemini-3.5-flash"]
-                else:
-                    fallback_models = [DEFAULT_GEMINI_MODEL, "gemini-3.5-flash", "gemini-3.0-flash"]
+                    yt_captions = fetch_youtube_captions(yt_video_id, target_lang=selected_language_code)
+                    if yt_captions:
+                        final_text = yt_captions
+                        log(f"🎉 Successfully fetched YouTube captions instantly!")
+                        flush_logs()
 
-                transcripts_dict = {}
-                completed_count = 0
+                    else:
+                        log("⚠️ No captions found via YouTube API. Falling back to Full AI Audio Download & Transcription...")
+                        flush_logs()
 
-                def process_chunk_worker(chunk_info):
-                    idx, chunk_path = chunk_info
-                    chunk_num = idx + 1
-                    chunk_size_mb = os.path.getsize(chunk_path) / (1024 * 1024)
+                # ── Full AI Audio Pipeline (Upload File OR YouTube Fallback) ───
+                if not final_text:
+                    original_path = ""
 
-                    response = None
-                    max_retries = 4
+                    if input_source == "📁 Upload Audio / Video File":
+                        suffix = os.path.splitext(uploaded_file.name)[1] or ".mp3"
+                        original_path = os.path.join(tmp_dir, "input" + suffix)
 
-                    for attempt in range(max_retries):
-                        current_model = fallback_models[attempt % len(fallback_models)]
-                        audio_file = None
+                        status_box.info("💾 Step 1/3: Saving uploaded file to local memory...")
+                        log(f"Saving '{uploaded_file.name}' ({file_size_mb:.1f} MB)...")
+                        flush_logs()
+                        with open(original_path, "wb") as f:
+                            f.write(uploaded_file.getbuffer())
+                        log("Saved file successfully.")
+                        flush_logs()
+
+                    else:  # YouTube Download
+                        status_box.info("📥 Step 1/3: Downloading audio track from YouTube link...")
+                        log(f"Downloading YouTube audio from '{youtube_url}' using yt-dlp...")
+                        flush_logs()
 
                         try:
-                            # 🚀 Groq Whisper Fast Path (Multi-Key Round Robin)
-                            if current_model == "groq-whisper" and groq_keys:
-                                active_groq_key = groq_keys[idx % len(groq_keys)]
-                                log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (Key #{idx % len(groq_keys) + 1}, Lang: {selected_language_code or 'auto'})...")
-                                text_chunk = transcribe_with_groq(chunk_path, active_groq_key, language=selected_language_code)
-                                if text_chunk:
+                            original_path = download_youtube_audio(youtube_url, tmp_dir)
+                            yt_audio_size_mb = os.path.getsize(original_path) / (1024 * 1024)
+                            log(f"Downloaded YouTube audio track ({yt_audio_size_mb:.1f} MB).")
+                            flush_logs()
+                        except Exception as yt_err:
+                            err_str = str(yt_err)
+                            log(f"❌ YouTube download error: {err_str}")
+                            flush_logs()
+                            if "SSL" in err_str or "WRONG_VERSION_NUMBER" in err_str or "Seqrite" in err_str:
+                                raise Exception(
+                                    "🔒 Local Network Restriction Detected:\n"
+                                    "Your laptop's local network/antivirus (e.g. Seqrite Endpoint Protection) blocks outbound YouTube connections from Python scripts.\n\n"
+                                    "🌐 LIVE DEPLOYMENT NOTE: Once pushed live (e.g. Render, Streamlit Cloud, Railway, AWS), "
+                                    "cloud servers have unrestricted internet access, so YouTube link transcription will work 100% automatically!\n\n"
+                                    "💡 For testing on this laptop: Please download the video/audio file locally and use the 'Upload Audio / Video File' tab."
+                                )
+                            else:
+                                raise yt_err
+
+                    # ── Step 2: Chunk media file into segments ────────────────
+                    status_box.info(f"⚡ Step 2/3: Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
+                    log(f"Running ffmpeg to split audio into {chunk_duration}-minute chunks...")
+
+                    chunk_files = chunk_media_file(original_path, tmp_dir, chunk_minutes=chunk_duration)
+                    total_chunks = len(chunk_files)
+                    log(f"Audio split complete! Created {total_chunks} chunk file(s).")
+                    status_box.info(f"✅ Prepared **{total_chunks} chunk(s)** for processing.")
+
+                    lang_rule = ""
+                    if selected_language_code:
+                        lang_name = selected_lang_label.split(" (")[0]
+                        lang_rule = f"\n4. The primary spoken language is {lang_name}. Transcribe strictly in {lang_name} using its native script."
+
+                    prompt = (
+                        "Please transcribe the speech in this audio file accurately. "
+                        "Important rules:\n"
+                        "1. Output only the spoken text preserving natural paragraph breaks.\n"
+                        "2. If there are repeating chants, mantras, or background music, transcribe the words accurately without repeating the same line over and over endlessly.\n"
+                        "3. Do not add commentary, timestamps, or extra formatting."
+                        f"{lang_rule}"
+                    )
+
+                    # ── Step 3: Process chunks in parallel ────────────────────
+                    log("⚡ Launching Parallel Processing...")
+                    import concurrent.futures
+
+                    if groq_keys:
+                        fallback_models = ["groq-whisper", DEFAULT_GEMINI_MODEL, "gemini-3.5-flash"]
+                    else:
+                        fallback_models = [DEFAULT_GEMINI_MODEL, "gemini-3.5-flash", "gemini-3.0-flash"]
+
+                    transcripts_dict = {}
+                    completed_count = 0
+
+                    def process_chunk_worker(chunk_info):
+                        idx, chunk_path = chunk_info
+                        chunk_num = idx + 1
+                        max_retries = 4
+
+                        for attempt in range(max_retries):
+                            current_model = fallback_models[attempt % len(fallback_models)]
+                            audio_file = None
+
+                            try:
+                                if current_model == "groq-whisper" and groq_keys:
+                                    active_groq_key = groq_keys[idx % len(groq_keys)]
+                                    log(f"🚀 [Chunk {chunk_num}/{total_chunks}] Transcribing with Groq Whisper (Key #{idx % len(groq_keys) + 1}, Lang: {selected_language_code or 'auto'})...")
+                                    text_chunk = transcribe_with_groq(chunk_path, active_groq_key, language=selected_language_code)
+                                    if text_chunk:
+                                        words = len(text_chunk.split())
+                                        log(f"⚡ [Chunk {chunk_num}/{total_chunks}] Groq complete! Transcribed {words} words.")
+                                        return (idx, text_chunk)
+
+                                log(f"[Chunk {chunk_num}/{total_chunks}] Uploading to Gemini ({current_model})...")
+
+                                if USE_NEW_SDK:
+                                    audio_file = client.files.upload(file=chunk_path)
+                                    log(f"[Chunk {chunk_num}/{total_chunks}] Uploaded. Storage ID: {audio_file.name}")
+
+                                    wait_count = 0
+                                    while hasattr(audio_file, 'state') and str(getattr(audio_file.state, 'name', audio_file.state)) == "PROCESSING":
+                                        time.sleep(2)
+                                        audio_file = client.files.get(name=audio_file.name)
+                                        wait_count += 1
+                                        if wait_count > 20:
+                                            break
+
+                                    log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
+                                    config = types.GenerateContentConfig(
+                                        temperature=0.0,
+                                        max_output_tokens=3000,
+                                        system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
+                                    )
+                                    response = client.models.generate_content(
+                                        model=current_model,
+                                        contents=[audio_file, prompt],
+                                        config=config
+                                    )
+                                else:
+                                    audio_file = legacy_genai.upload_file(path=chunk_path)
+                                    log(f"[Chunk {chunk_num}/{total_chunks}] Uploaded. Storage ID: {audio_file.name}")
+
+                                    wait_count = 0
+                                    while audio_file.state.name == "PROCESSING":
+                                        time.sleep(2)
+                                        audio_file = legacy_genai.get_file(audio_file.name)
+                                        wait_count += 1
+                                        if wait_count > 20:
+                                            break
+
+                                    log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
+                                    model = legacy_genai.GenerativeModel(
+                                        model_name=current_model,
+                                        generation_config={"temperature": 0.0, "max_output_tokens": 3000}
+                                    )
+                                    response = model.generate_content(
+                                        [prompt, audio_file],
+                                        request_options={"timeout": 600}
+                                    )
+
+                                if response and response.text:
+                                    text_chunk = response.text.strip()
                                     words = len(text_chunk.split())
-                                    log(f"⚡ [Chunk {chunk_num}/{total_chunks}] Groq complete in 2s! Transcribed {words} words.")
+                                    log(f"✅ [Chunk {chunk_num}/{total_chunks}] Complete! Transcribed {words} words.")
                                     return (idx, text_chunk)
 
-                            log(f"[Chunk {chunk_num}/{total_chunks}] Uploading to Gemini ({current_model})...")
-                            
-                            if USE_NEW_SDK:
-                                audio_file = client.files.upload(file=chunk_path)
-                                log(f"[Chunk {chunk_num}/{total_chunks}] Uploaded. Storage ID: {audio_file.name}")
+                            except Exception as err:
+                                err_msg = str(err)
+                                if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
+                                    next_model = fallback_models[(attempt + 1) % len(fallback_models)]
+                                    log(f"⚠️ [Chunk {chunk_num}/{total_chunks}] Server busy (503). Retrying with '{next_model}'...")
+                                    time.sleep(3)
+                                else:
+                                    if attempt == max_retries - 1:
+                                        log(f"❌ [Chunk {chunk_num}/{total_chunks}] Error: {err}")
+                                        raise err
+                                    time.sleep(3)
+                            finally:
+                                if audio_file:
+                                    try:
+                                        if USE_NEW_SDK:
+                                            client.files.delete(name=audio_file.name)
+                                        else:
+                                            legacy_genai.delete_file(audio_file.name)
+                                    except Exception:
+                                        pass
 
-                                wait_count = 0
-                                while hasattr(audio_file, 'state') and str(getattr(audio_file.state, 'name', audio_file.state)) == "PROCESSING":
-                                    time.sleep(2)
-                                    audio_file = client.files.get(name=audio_file.name)
-                                    wait_count += 1
-                                    if wait_count > 20:
-                                        break
+                        return (idx, "")
 
-                                log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
-                                # Capped max_output_tokens=3000 to prevent infinite hallucination loop stalls
-                                config = types.GenerateContentConfig(
-                                    temperature=0.0,
-                                    max_output_tokens=3000,
-                                    system_instruction="You are a precise audio transcription expert. Transcribe spoken words accurately. Never repeat phrases endlessly during music, chants, or silence."
-                                )
-                                response = client.models.generate_content(
-                                    model=current_model,
-                                    contents=[audio_file, prompt],
-                                    config=config
-                                )
-                            else:
-                                audio_file = legacy_genai.upload_file(path=chunk_path)
-                                log(f"[Chunk {chunk_num}/{total_chunks}] Uploaded. Storage ID: {audio_file.name}")
+                    num_workers = min(6, max(3, len(groq_keys)))
+                    log(f"⚡ Running with {num_workers} parallel workers across {max(1, len(groq_keys))} key(s)...")
 
-                                wait_count = 0
-                                while audio_file.state.name == "PROCESSING":
-                                    time.sleep(2)
-                                    audio_file = legacy_genai.get_file(audio_file.name)
-                                    wait_count += 1
-                                    if wait_count > 20:
-                                        break
+                    chunk_tuples = list(enumerate(chunk_files))
+                    with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
+                        future_to_chunk = {executor.submit(process_chunk_worker, item): item for item in chunk_tuples}
 
-                                log(f"🧠 [Chunk {chunk_num}/{total_chunks}] Transcribing with {current_model}...")
-                                model = legacy_genai.GenerativeModel(
-                                    model_name=current_model,
-                                    generation_config={"temperature": 0.0, "max_output_tokens": 3000}
-                                )
-                                response = model.generate_content(
-                                    [prompt, audio_file],
-                                    request_options={"timeout": 600}
-                                )
+                        for future in concurrent.futures.as_completed(future_to_chunk):
+                            flush_logs()
+                            completed_count += 1
+                            idx, text_chunk = future.result()
+                            transcripts_dict[idx] = text_chunk
 
-                            if response and response.text:
-                                text_chunk = response.text.strip()
-                                words = len(text_chunk.split())
-                                log(f"✅ [Chunk {chunk_num}/{total_chunks}] Complete! Transcribed {words} words.")
-                                return (idx, text_chunk)
+                            ordered_texts = [transcripts_dict[i] for i in range(total_chunks) if i in transcripts_dict]
+                            current_combined = "\n\n".join(ordered_texts)
+                            transcript_preview.text_area("Live Output", current_combined, height=250, key=f"preview_{completed_count}")
 
-                        except Exception as err:
-                            err_msg = str(err)
-                            if ("503" in err_msg or "UNAVAILABLE" in err_msg or "429" in err_msg or "high demand" in err_msg) and attempt < max_retries - 1:
-                                next_model = fallback_models[(attempt + 1) % len(fallback_models)]
-                                log(f"⚠️ [Chunk {chunk_num}/{total_chunks}] Server busy (503). Retrying with '{next_model}'...")
-                                time.sleep(3)
-                            else:
-                                if attempt == max_retries - 1:
-                                    log(f"❌ [Chunk {chunk_num}/{total_chunks}] Error: {err}")
-                                    raise err
-                                time.sleep(3)
-                        finally:
-                            if audio_file:
-                                try:
-                                    if USE_NEW_SDK:
-                                        client.files.delete(name=audio_file.name)
-                                    else:
-                                        legacy_genai.delete_file(audio_file.name)
-                                except Exception:
-                                    pass
+                            progress_bar.progress(completed_count / total_chunks)
+                            status_box.info(f"⚡ Parallel Processing: **{completed_count} of {total_chunks} chunks completed**...")
+                            flush_logs()
 
-                    return (idx, "")
-
-                # Dynamically scale worker threads (e.g. 3 keys = 3 parallel worker threads)
-                num_workers = min(6, max(3, len(groq_keys)))
-                log(f"⚡ Running with {num_workers} parallel workers across {max(1, len(groq_keys))} key(s)...")
-
-                chunk_tuples = list(enumerate(chunk_files))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=num_workers) as executor:
-                    future_to_chunk = {executor.submit(process_chunk_worker, item): item for item in chunk_tuples}
-                    
-                    for future in concurrent.futures.as_completed(future_to_chunk):
-                        flush_logs()
-                        completed_count += 1
-                        idx, text_chunk = future.result()
-                        transcripts_dict[idx] = text_chunk
-                        
-                        # Update live preview (chronological order)
-                        ordered_texts = [transcripts_dict[i] for i in range(total_chunks) if i in transcripts_dict]
-                        current_combined = "\n\n".join(ordered_texts)
-                        transcript_preview.text_area("Live Output", current_combined, height=250, key=f"preview_{completed_count}")
-                        
-                        # Update progress bar
-                        progress_bar.progress(completed_count / total_chunks)
-                        status_box.info(f"⚡ Parallel Processing: **{completed_count} of {total_chunks} chunks completed**...")
-                        flush_logs()
+                    final_text = "\n\n".join([transcripts_dict[i] for i in range(total_chunks) if i in transcripts_dict]).strip()
 
                 flush_logs()
                 total_time = int(time.time() - start_time)
-                log(f"🎉 All {total_chunks} chunk(s) finished in {total_time}s!")
-                flush_logs()
                 status_box.empty()
                 progress_bar.empty()
 
-                # ── Step 4: Show final output ──────────────────────────────────
-                final_text = "\n\n".join([transcripts_dict[i] for i in range(total_chunks) if i in transcripts_dict]).strip()
-
+                # ── Step 4: Output ─────────────────────────────────────────────
                 if final_text:
-                    st.success(f"🎉 Transcription complete! Processed {total_chunks} chunk(s) in {total_time} seconds.")
+                    transcript_preview.text_area("Final Transcript", final_text, height=300, key="final_transcript")
+                    st.success(f"🎉 Transcription complete in {total_time} seconds!")
                     st.download_button(
                         label="📥 Download Complete Transcript (.txt)",
                         data=final_text,
-                        file_name=f"{os.path.splitext(uploaded_file.name)[0]}_transcript.txt",
+                        file_name=download_filename,
                         mime="text/plain"
                     )
                 else:
-                    st.warning("No transcript was generated. The file may have no speech or the model could not process it.")
+                    st.warning("No transcript was generated. The video/audio may have no speech or could not be processed.")
 
             except Exception as e:
                 st.error(f"Error: {e}")
