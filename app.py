@@ -131,60 +131,161 @@ def fetch_youtube_captions(video_id, target_lang=None):
 
 
 def download_youtube_audio(url, output_dir):
-    """Downloads audio from YouTube link using yt-dlp with player_client fallback for cloud servers."""
+    """Downloads audio from YouTube link using yt-dlp with multiple bot-detection bypass strategies."""
     output_template = os.path.join(output_dir, "yt_audio.%(ext)s")
 
-    # Rotate player_client options (android, ios, mweb, tv, web_embedded) to bypass cloud bot detection
-    client_configs = [
-        ['android', 'ios'],
-        ['mweb', 'tv'],
-        ['web_embedded'],
-        ['android'],
-        ['ios'],
-        ['web']
-    ]
+    # Common postprocessor and header settings
+    common_opts = {
+        'format': 'bestaudio/best',
+        'outtmpl': output_template,
+        'nocheckcertificate': True,
+        'postprocessors': [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': 'mp3',
+            'preferredquality': '192',
+        }],
+        'quiet': True,
+        'no_warnings': True,
+    }
 
-    last_err = None
-    for clients in client_configs:
+    def _get_result(output_dir):
+        mp3_path = os.path.join(output_dir, "yt_audio.mp3")
+        if os.path.exists(mp3_path):
+            return mp3_path
+        files = glob.glob(os.path.join(output_dir, "yt_audio.*"))
+        return files[0] if files else None
+
+    # Strategy 1: tv_embedded client — most reliable for bot-detection bypass
+    try:
+        opts = {
+            **common_opts,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['tv_embedded'],
+                    'skip': ['dash', 'hls'],
+                }
+            },
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        result = _get_result(output_dir)
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Strategy 2: web_creator client (newer bypass)
+    try:
+        opts = {
+            **common_opts,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['web_creator'],
+                }
+            },
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        result = _get_result(output_dir)
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Strategy 3: android + tv_embedded combination
+    try:
+        opts = {
+            **common_opts,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'tv_embedded'],
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'com.google.android.youtube/19.29.37 (Linux; U; Android 11) gzip',
+            },
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        result = _get_result(output_dir)
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Strategy 4: ios client with updated user-agent
+    try:
+        opts = {
+            **common_opts,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios'],
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'com.google.ios.youtube/19.29.1 (iPhone16,2; U; CPU iOS 17_5_1 like Mac OS X)',
+            },
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        result = _get_result(output_dir)
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Strategy 5: mweb + web_embedded fallback
+    try:
+        opts = {
+            **common_opts,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['mweb', 'web_embedded'],
+                }
+            },
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+                'Accept-Language': 'en-US,en;q=0.9',
+            },
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            ydl.download([url])
+        result = _get_result(output_dir)
+        if result:
+            return result
+    except Exception:
+        pass
+
+    # Strategy 6: Use cookies from Chrome browser if available (works best locally)
+    for browser in ['chrome', 'firefox', 'edge', 'safari']:
         try:
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': output_template,
-                'nocheckcertificate': True,
+            opts = {
+                **common_opts,
+                'cookiesfrombrowser': (browser, None, None, None),
                 'extractor_args': {
                     'youtube': {
-                        'player_client': clients
+                        'player_client': ['web'],
                     }
                 },
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-                    'Accept-Language': 'en-US,en;q=0.9',
                 },
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'quiet': True,
-                'no_warnings': True,
             }
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            with yt_dlp.YoutubeDL(opts) as ydl:
                 ydl.download([url])
-
-            mp3_path = os.path.join(output_dir, "yt_audio.mp3")
-            if os.path.exists(mp3_path):
-                return mp3_path
-
-            files = glob.glob(os.path.join(output_dir, "yt_audio.*"))
-            if files:
-                return files[0]
-        except Exception as e:
-            last_err = e
+            result = _get_result(output_dir)
+            if result:
+                return result
+        except Exception:
             continue
 
-    if last_err:
-        raise last_err
-    raise Exception("Could not download audio from YouTube URL.")
+    raise Exception(
+        "❌ YouTube Bot Detection: All download strategies failed.\n\n"
+        "YouTube is blocking server-based downloads. Possible fixes:\n"
+        "1. Update yt-dlp: pip install -U yt-dlp\n"
+        "2. Use the 'Upload Audio / Video File' tab instead.\n"
+        "3. Deploy to a fresh cloud instance (Render/Railway/Hugging Face)."
+    )
 
 
 
@@ -558,8 +659,19 @@ if can_proceed:
                                     "cloud servers have unrestricted internet access, so YouTube link transcription will work 100% automatically!\n\n"
                                     "💡 For testing on this laptop: Please download the video/audio file locally and use the 'Upload Audio / Video File' tab."
                                 )
+                            elif "Sign in to confirm" in err_str or "bot" in err_str.lower() or "Bot Detection" in err_str:
+                                raise Exception(
+                                    "🤖 YouTube Bot Detection Blocked the Download\n\n"
+                                    "YouTube is rate-limiting/blocking this server's IP.\n\n"
+                                    "**Quick Fixes:**\n"
+                                    "1. **Wait & Retry** — Try again in a few minutes\n"
+                                    "2. **Update yt-dlp** — Run: `pip install -U yt-dlp`\n"
+                                    "3. **Upload the file directly** — Download the video locally and use the '📁 Upload Audio / Video File' tab\n"
+                                    "4. **Redeploy** — A fresh cloud deployment often gets a new IP that YouTube hasn't blocked yet"
+                                )
                             else:
                                 raise yt_err
+
 
                     # ── Step 2: Chunk media file into segments ────────────────
                     status_box.info(f"⚡ Step 2/3: Slicing audio into {chunk_duration}-minute chunks with ffmpeg...")
